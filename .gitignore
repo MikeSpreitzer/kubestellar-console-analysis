@@ -216,3 +216,13 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# console-analysis: project-specific
+config.yaml
+data/
+output/
+repos/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

@@ -1,0 +1,7 @@
+# Copyright 2026 Mike Spreitzer
+# SPDX-License-Identifier: Apache-2.0
+
+requests>=2.31
+PyYAML>=6.0
+pandas>=2.2
+matplotlib>=3.8

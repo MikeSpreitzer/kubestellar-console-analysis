@@ -1,0 +1,53 @@
+# Copyright 2026 Mike Spreitzer
+# SPDX-License-Identifier: Apache-2.0
+
+# Copy this file to config.yaml and edit. The real config.yaml is gitignored.
+#
+# This example uses the absolute paths that match the Docker bind-mount
+# layout described in README.md. Adjust if running on the host directly.
+
+# Name of the environment variable holding your GitHub PAT.
+# Create the PAT at https://github.com/settings/personal-access-tokens
+# with "Public Repositories (read-only)" access.
+github_token_env: GITHUB_TOKEN
+
+# Where the database and on-disk artifacts live.
+# In the container these are bind-mounted from the host; on the host
+# directly, point them at the desired host directory.
+data_dir: /data
+output_dir: /output
+
+repos:
+  - owner: kubestellar
+    name: console
+    role: subject
+    # Path to a local git clone for git-history extraction.
+    # In the container, /repos is a read-only bind mount.
+    local_clone: /repos/console
+
+  - owner: kubestellar
+    name: infra
+    role: support
+    local_clone: /repos/infra
+
+  # When ready to add docs as a subject:
+  # - owner: kubestellar
+  #   name: docs
+  #   role: subject
+  #   local_clone: /repos/docs
+
+extraction:
+  # Concurrent log-fetch ceiling. Keep low to avoid GitHub's secondary
+  # rate limits (which include a 100-concurrent cap).
+  log_fetch_concurrency: 5
+  # Logs are small per-run and useful for classifying workflow producers.
+  fetch_logs: true
+  # Artifacts can be very large per-run on agentically-developed CI; a
+  # full fetch produced 159 GB on the first try. Default off; flip on
+  # only when artifacts are specifically needed.
+  fetch_artifacts: false
+
+analysis:
+  daily_bin_timezone: UTC
+  # Inter-commit gap for collapsing flurries. null means compute from data.
+  flurry_gap_minutes: null
