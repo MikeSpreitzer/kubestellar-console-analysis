@@ -163,13 +163,16 @@ The three forms have parallel names under
 ``output/csv/<repo>/`` respectively, so any single chart's numbers are
 inspectable without re-running the analysis.
 
-The analysis layer currently exposes two entry points:
-- ``src.analysis.first_look`` -- the bot- vs. human-credential
-  daily-binned plots described above.
+The analysis layer currently exposes three entry points:
+- ``src.analysis.first_look`` -- bot- vs. human-credential
+  daily-binned plots over GitHub-side data (issues, PRs, comments).
 - ``src.analysis.drilldown`` -- follow-ups that surface specific
   rows or per-actor breakdowns informed by what the first-look plots
   reveal. Outputs are mostly CSV tables; the time-series follow-ups
   also produce HTML.
+- ``src.analysis.commit_authorship`` -- credential analysis at commit
+  granularity using the git-extractor's ``commit_`` table, plus a
+  cross-tab joining commit authorship to PR identity.
 
 For the specific plots and tables each entry point produces today, see
 [Current analysis outputs](#current-analysis-outputs) below.
@@ -229,6 +232,32 @@ The cutoff and window are CLI flags (``--cutoff YYYY-MM-DD``,
 ``--window-days N``); the default cutoff is informally derived from a
 pixellated reading of the first-look plots and should be refined as
 data accumulates.
+
+**``commit_authorship``: credential analysis at commit granularity,
+plus a join to PR identity.** Reads the git-extractor's ``commit_``
+table. Classification combines two signals: ``author_login`` ending in
+``[bot]`` (derived from GitHub noreply emails by the git extractor)
+and ``author_email`` matching a known bot-email allowlist (currently
+``copilot@github.com``, ``scanner@kubestellar.io``,
+``reviewer@claude-dev.local`` -- maintained additively as new
+automation is observed).
+
+1. **Commits authored per day, by author credential** -- daily
+   stacked-area plot per repo (PNG + HTML + CSV), in the same shape
+   as the first-look plots but at commit granularity.
+2. **PR vs. commit-author cross-tab** -- one row per merged PR with
+   the PR's author credential, the merger credential, and the
+   credential of the author of the merge commit. Currently uses the
+   merge commit's authorship as a coarse proxy for "what produced the
+   PR's changes"; a future refinement would walk the PR's full commit
+   set. Output: a full per-PR CSV, a credential-cross-tab summary
+   CSV, and a CSV restricted to the most analytically interesting
+   cell (PR-author=bot but commit-author=human, the "developer used
+   a tool that pushed under their identity, then a bot opened the
+   PR" pattern).
+3. **Bot-author commit producers** -- daily counts per bot login or
+   bot-email producer (PNG-equivalent HTML + CSV summary), parallel
+   to drilldown's ``bot_issue_producers``.
 
 ### Layer 4 — interpretation (out of scope for code)
 

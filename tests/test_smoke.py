@@ -23,7 +23,7 @@ def test_imports():
         comments, issues, labels, pr_files, reactions, reviews, runs, timelines,
     )
     from src.extractor_git import git_cli, walker  # noqa: F401
-    from src.analysis import first_look, drilldown  # noqa: F401
+    from src.analysis import first_look, drilldown, commit_authorship  # noqa: F401
 
 
 def test_schema_applies():
@@ -250,6 +250,32 @@ def test_first_look_classifies_login():
     assert _classify_login(None) == CREDENTIAL_UNKNOWN
 
 
+def test_commit_authorship_classifies_commit():
+    import math
+    from src.analysis.commit_authorship import (
+        _classify_commit, CREDENTIAL_BOT, CREDENTIAL_HUMAN, CREDENTIAL_UNKNOWN,
+    )
+    # Login-based bot
+    assert _classify_commit("dependabot[bot]", None) == CREDENTIAL_BOT
+    assert _classify_commit("kubestellar-hive[bot]", "any@example.com") == CREDENTIAL_BOT
+    # Email-based bot (no login)
+    assert _classify_commit(None, "scanner@kubestellar.io") == CREDENTIAL_BOT
+    assert _classify_commit(None, "copilot@github.com") == CREDENTIAL_BOT
+    assert _classify_commit(None, "reviewer@claude-dev.local") == CREDENTIAL_BOT
+    # Human (real email)
+    assert _classify_commit(None, "andy@clubanderson.com") == CREDENTIAL_HUMAN
+    assert _classify_commit("clubanderson", "andy@clubanderson.com") == CREDENTIAL_HUMAN
+    # Unknown (no signal)
+    assert _classify_commit(None, None) == CREDENTIAL_UNKNOWN
+    assert _classify_commit(None, "") == CREDENTIAL_UNKNOWN
+    # Pandas NaN (a float) must be tolerated -- regression test for
+    # the AttributeError seen on first real run.
+    nan = float("nan")
+    assert _classify_commit(nan, nan) == CREDENTIAL_UNKNOWN
+    assert _classify_commit(nan, "andy@clubanderson.com") == CREDENTIAL_HUMAN
+    assert _classify_commit("dependabot[bot]", nan) == CREDENTIAL_BOT
+
+
 def test_first_look_daily_counts():
     """Verify daily binning groups by UTC day and pivots correctly."""
     import pandas as pd
@@ -356,6 +382,7 @@ if __name__ == "__main__":
     test_hourly_checker_zero_interval_always_checks()
     test_connect_readonly_refuses_writes()
     test_first_look_classifies_login()
+    test_commit_authorship_classifies_commit()
     test_first_look_daily_counts()
     test_iso8601_timestamps_roundtrip()
     print("smoke tests passed")

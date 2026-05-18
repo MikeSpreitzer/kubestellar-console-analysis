@@ -126,6 +126,20 @@ an apparent transition date:
 The drilldown takes optional `--cutoff YYYY-MM-DD` (default
 2026-05-03) and `--window-days N` (default 5).
 
+`commit_authorship` analyzes credentials at commit granularity using
+the git-extractor's `commit_` table. It produces a daily commits-by-
+credential plot, a PR-vs-commit-author cross-tab (surfacing the
+"bot-opened PR with human commit-author" pattern), and a per-bot-email
+commit producer plot. Requires the git extractor to have run first:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(pwd)/output:/output" \
+      console-analysis \
+      -m src.analysis.commit_authorship --config /config/config.yaml --verbose
+
 Each plot is produced in three forms:
 - `output/plots/<repo>/*.png` -- static, portable, paste-into-doc
 - `output/html/<repo>/*.html` -- interactive (Plotly), hover for
