@@ -20,7 +20,26 @@ autonomous development of `kubestellar/console` (and later
 artifacts available from Git and GitHub. Concretely: how much of the
 work is human, how much is agent-produced, what kinds of agent
 producers operate and when each came online, and how those proportions
-have moved over time.
+have moved over time. `kubestellar/hive` is treated as a support
+repository (not a subject of the analysis): hive is the supervisory
+layer that drives console's agentic activity, so its commit history
+and configuration files are useful evidence of what the agentic
+system does and when, but hive's own development is not currently
+analyzed. (Among other things, hive itself does not appear to be
+managed by the same system of agents that operates on console and
+docs.)
+
+A note on the support role as currently exercised: the analysis layer
+actually reads support-repo content for only one purpose today --
+resolving `@main` reusable-workflow imports against `kubestellar/infra`.
+Hive is included as a support repo on the speculation that the role
+will broaden -- e.g., to capture hive's policy files
+(`agents/`, `bin/`, `config/`) as a content time series, so future
+subject-focused analyses can ask questions like "which scanner
+CLAUDE.md was active when this subject PR was merged?" Until that
+broadening happens, hive's commits sit in the database unused but
+consistent. See SCHEMA.md and the open task on broadening the
+content-snapshot path filter for details.
 
 A possible later goal — to the degree the artifacts support it — is to
 assess the quality of the work being developed. That goal is more
@@ -532,9 +551,10 @@ console-analysis/
 │               ├── logs.tar.gz
 │               └── artifacts/...
 ├── repos/                             # gitignored, optional
-│   ├── kubestellar-console/           # git clone of subject repo
-│   ├── kubestellar-docs/
-│   └── kubestellar-infra/
+│   ├── kubestellar-console/           # subject
+│   ├── kubestellar-docs/              # subject (when added)
+│   ├── kubestellar-hive/              # support (supervisory layer)
+│   └── kubestellar-infra/             # support (reusable workflows)
 ├── src/
 │   ├── schema.sql                     # DDL matching SCHEMA.md
 │   ├── extractor_github/              # layer 1, GitHub side
@@ -568,6 +588,10 @@ repos:
     name: console
     role: subject
     local_clone: ../console            # path to git clone (optional)
+  - owner: kubestellar
+    name: hive
+    role: support                       # supervisory layer; not a subject
+    local_clone: ../hive
   - owner: kubestellar
     name: infra
     role: support

@@ -28,8 +28,22 @@ repos:
 
   - owner: kubestellar
     name: infra
-    role: support
+    role: support              # holds reusable workflows imported by callers
     local_clone: /repos/infra
+
+  - owner: kubestellar
+    name: hive
+    role: support              # supervisory agent system; operates on the
+                               # subjects rather than being analyzed itself.
+                               # Currently the analysis layer doesn't read
+                               # anything from hive -- the support role only
+                               # actively reads workflow files from
+                               # `kubestellar/infra` -- but hive is included
+                               # in anticipation of broadening the role
+                               # (see DESIGN.md and SCHEMA.md for why).
+                               # Removing this entry is also reasonable if
+                               # you want a tighter database.
+    local_clone: /repos/hive
 
   # When ready to add docs as a subject:
   # - owner: kubestellar

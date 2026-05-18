@@ -30,11 +30,30 @@ We distinguish three kinds of repositories in the schema:
 
 - **subject** repositories are the analysis targets. Full corpus of issues,
   PRs, timelines, reactions, reviews, comments, workflow runs (metadata always,
-  logs and artifacts when still in retention). Initially `kubestellar/console`.
+  logs and artifacts when still in retention). Currently `kubestellar/console`;
+  `kubestellar/docs` to be added.
 
-- **support** repositories are referenced by subject repositories' workflows.
-  We extract workflow file contents at every commit that touches them, but not
-  their issues or PRs. Initially `kubestellar/infra`.
+- **support** repositories are not analysis targets but are extracted because
+  they bear directly on what happens in the subjects. Currently:
+  `kubestellar/infra` (holds reusable workflows imported by the subjects'
+  callers); `kubestellar/hive` (the supervisory agent system that operates
+  on the subjects -- its commit history and configuration are evidence of
+  what the agentic system does and when, but hive's own development is not
+  itself analyzed).
+  For support repos, we extract per-commit metadata and the contents of
+  workflow files, but not issues or PRs.
+
+  As of this writing, the support role is narrowly exercised: the only
+  thing the analysis layer actually reads from support repos is workflow
+  file contents, and only `kubestellar/infra` contributes to that purpose
+  (it holds the reusable workflows imported by the subjects). Hive is
+  included as a support repo in anticipation of broadening the role --
+  for example, to capture hive's policy files (`agents/`, `bin/`,
+  `config/`) as a content time series, so future analyses can ask
+  questions like "which scanner CLAUDE.md was active when this subject
+  PR was merged?" That broadening is tracked as a future task; until
+  then, hive's commit and per-file-change rows sit in the database
+  unused but consistent.
 
 - A repository can be both subject and support; the `role` column records this.
 
