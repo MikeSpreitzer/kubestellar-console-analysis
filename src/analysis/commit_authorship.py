@@ -67,6 +67,14 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 
+from ..classifier.record import Record
+from ..classifier.rules import (
+    CREDENTIAL_BOT,
+    CREDENTIAL_HUMAN,
+    CREDENTIAL_UNKNOWN,
+    classify,
+    credential_class_of,
+)
 from ..common.config import load_config
 from ..common.db import connect_readonly
 from ._plotly_html import write_html_with_title
@@ -75,27 +83,11 @@ from ._plotly_html import write_html_with_title
 log = logging.getLogger(__name__)
 
 
-# Credential classes used in this module's outputs. Same names as
-# first_look so plots have consistent legends across modules.
-CREDENTIAL_HUMAN = "human-credentialed"
-CREDENTIAL_BOT = "bot-credentialed"
-CREDENTIAL_UNKNOWN = "unknown"
-
 COLORS = {
     CREDENTIAL_HUMAN: "#1f77b4",
     CREDENTIAL_BOT: "#d62728",
     CREDENTIAL_UNKNOWN: "#7f7f7f",
 }
-
-# Known bot-author emails. The list is grounded in the actual data:
-# these are the emails we observed authoring commits that were not
-# already classified as bot via the noreply-login path. Maintain
-# additively as new automation appears.
-BOT_AUTHOR_EMAILS = frozenset({
-    "copilot@github.com",
-    "scanner@kubestellar.io",
-    "reviewer@claude-dev.local",
-})
 
 
 # Regex for Co-Authored-By trailers. Git convention: one or more
@@ -162,21 +154,27 @@ def _trailer_names_ai_tool(name: str, email: str) -> bool:
 
 
 def _classify_commit(login: Optional[str], email: Optional[str]) -> str:
-    # Coerce pandas NaN (a float) and any other non-string null value
-    # to None. SQLite stores NULL; pandas reads it back as NaN by
-    # default for object-dtype columns. The downstream str checks
-    # below assume real strings or None.
+    """Coarse credential class for a commit, derived from the shared
+    classifier rules.
+
+    Pandas reads SQLite NULLs back as NaN for object-dtype columns;
+    the classifier accepts only ``None`` or strings, so we coerce
+    non-strings to ``None`` first.
+    """
     if not isinstance(login, str):
         login = None
     if not isinstance(email, str):
         email = None
-    if login and login.endswith("[bot]"):
-        return CREDENTIAL_BOT
-    if email and email in BOT_AUTHOR_EMAILS:
-        return CREDENTIAL_BOT
-    if login or email:
-        return CREDENTIAL_HUMAN
-    return CREDENTIAL_UNKNOWN
+    rec = Record(
+        target_kind="commit",
+        target_id=0,
+        author_login=login,
+        author_email=email,
+        author_name=None,
+        created_at="",
+    )
+    verdict, _ = classify(rec)
+    return credential_class_of(verdict.producer)
 
 
 # ----------------------------------------------------------------------
@@ -461,17 +459,32 @@ def bot_email_producers(
         return
 
     def _producer_key(row) -> Optional[str]:
+        """Identify the bot producer of this commit by login or email.
+
+        Runs the shared classifier and returns the verdict's
+        ``sub_producer`` (which carries the matched login or email)
+        when the resulting credential class is ``bot-credentialed``.
+        Returns None for human-credentialed or unknown rows so they
+        are excluded from this plot.
+        """
         login = row["author_login"]
         email = row["author_email"]
         if not isinstance(login, str):
             login = None
         if not isinstance(email, str):
             email = None
-        if login and login.endswith("[bot]"):
-            return login
-        if email and email in BOT_AUTHOR_EMAILS:
-            return email
-        return None
+        rec = Record(
+            target_kind="commit",
+            target_id=0,
+            author_login=login,
+            author_email=email,
+            author_name=None,
+            created_at="",
+        )
+        verdict, _ = classify(rec)
+        if credential_class_of(verdict.producer) != CREDENTIAL_BOT:
+            return None
+        return verdict.sub_producer or verdict.producer
 
     df["producer"] = df.apply(_producer_key, axis=1)
     df = df.dropna(subset=["producer"])

@@ -140,21 +140,56 @@ by them.
 ### Layer 2 — classification
 
 Reads layer 1 output and produces `producer_classification` rows. The
-classifier is **time-aware**: a marker convention introduced in week N
-should classify only artifacts created at or after week N, with earlier
-artifacts left to other rules.
+classifier is uniform across artifact kinds: issues, PRs, commits,
+comments, and reviews are all presented to the rule list as a common
+``Record`` shape. ``Record`` carries fields broader than any single
+kind needs (``message`` for commits, ``labels`` for issues/PRs, etc.);
+predicates that branch on artifact-specific fields can guard with
+``r.target_kind``.
 
-The classifier preserves multiple verdicts per artifact (one per source).
-Analysis code picks among them by source authority when a single label is
-needed.
+Source code for the layer:
 
-Layer 2 is **stateless across runs** in the sense that it can be re-run
-from layer 1 output without requiring incremental bookkeeping. Each run
-is tagged with a `classifier_version` string. Re-running with the same
-version replaces existing rows for that version (so re-runs do not
-accumulate duplicates); re-running with a new version adds new rows
-alongside the old, so the output of two classifier versions can be
-compared side by side.
+- `src/classifier/record.py` -- the ``Record`` dataclass, with
+  ``target_kind`` ∈ ``{issue, pr, commit, comment, review}``.
+- `src/classifier/rules.py` -- the rule list, the producer constants,
+  the bot-email and bot-login lookup tables, the
+  ``credential_class_of(producer)`` mapping that the analysis layer
+  uses for coarse bot-vs-human-vs-unknown plotting, and a
+  ``rules_signature()`` over the lookup tables.
+- `src/classifier/adapters.py` -- per-kind generators that fetch rows
+  from sqlite and yield ``Record`` instances.
+- `src/classifier/main.py` -- the orchestrator: walks each subject
+  repo, runs every adapter, applies rules, writes verdicts.
+
+The classifier is **time-aware in spirit**: a marker convention
+introduced in week N should classify only artifacts created at or
+after week N, with earlier artifacts left to other rules. The current
+rule list does not yet exercise this -- predicates are
+time-invariant -- because the rules we have so far (login matches,
+email matches) are themselves time-invariant. When a time-conditioned
+rule is added, the predicate inspects ``r.created_at`` directly.
+
+The classifier preserves multiple verdicts per artifact (one per
+source). Source values: ``marker`` (the only one currently
+implemented; uses login, email, and other artifact-level signals);
+``workflow_run`` and ``journal`` are reserved in the schema for
+future enrichment from those data sources.
+
+Layer 2 is **stateless across runs** in the sense that it can be
+re-run from layer 1 output without requiring incremental bookkeeping.
+Each run is tagged with a `classifier_version` string defined at the
+top of `src/classifier/main.py`. Re-running with the same version
+deletes existing rows for that version (scoped to the repo being
+classified) before inserting fresh ones; re-running with a new
+version adds new rows alongside the old, so verdicts from two
+versions can be compared.
+
+To guard against forgetting to bump ``CLASSIFIER_VERSION`` after a
+rule change, the classifier maintains
+``classifier:<version>:rules_signature`` in ``extraction_state`` and
+checks it at startup. If the signature differs from what was stored
+under the same version previously, the classifier refuses to run
+until either the rules are reverted or the version is bumped.
 
 ### Layer 3 — analysis
 

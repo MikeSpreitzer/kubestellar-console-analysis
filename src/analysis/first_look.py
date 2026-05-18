@@ -43,17 +43,20 @@ import matplotlib.pyplot as plt  # noqa: E402
 import pandas as pd  # noqa: E402
 import plotly.graph_objects as go  # noqa: E402
 
+from ..classifier.record import Record
+from ..classifier.rules import (
+    CREDENTIAL_BOT,
+    CREDENTIAL_HUMAN,
+    CREDENTIAL_UNKNOWN,
+    classify,
+    credential_class_of,
+)
 from ..common.config import load_config
 from ..common.db import connect_readonly
 from ._plotly_html import write_html_with_title
 
 
 log = logging.getLogger(__name__)
-
-
-CREDENTIAL_HUMAN = "human-credentialed"
-CREDENTIAL_BOT = "bot-credentialed"
-CREDENTIAL_UNKNOWN = "unknown"
 
 
 # Color choices: bot lines warmer, human cooler. Consistent across plots.
@@ -74,11 +77,23 @@ def _setup_logging(verbose: bool) -> None:
 
 
 def _classify_login(login: Optional[str]) -> str:
-    if login is None:
-        return CREDENTIAL_UNKNOWN
-    if login.endswith("[bot]"):
-        return CREDENTIAL_BOT
-    return CREDENTIAL_HUMAN
+    """Classify a GitHub login into a coarse credential class.
+
+    Wraps the classifier: builds a minimal Record, runs the rule
+    list, returns the credential class of the resulting producer.
+    Used by analyses where the actor's login is the only available
+    signal (issues, PRs, comments, reviews on the GitHub side).
+    """
+    rec = Record(
+        target_kind="issue",  # kind doesn't affect credential classification
+        target_id=0,
+        author_login=login,
+        author_email=None,
+        author_name=None,
+        created_at="",
+    )
+    verdict, _ = classify(rec)
+    return credential_class_of(verdict.producer)
 
 
 def _daily_counts(

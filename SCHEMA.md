@@ -387,25 +387,48 @@ PRIMARY KEY (issue_id, pr_id, link_source)
 
 ### `producer_classification`
 
-Output of the classifier layer. Multiple rows per artifact are possible (one
-from `marker`, later one from `workflow_run`, etc.); the analysis layer picks
-among them by source authority.
+Output of the classifier layer. One row per (target, source,
+classifier_version) tuple. The (`target_kind`, `target_id`) pair points
+into the appropriate source table:
+
+- `issue` and `pr` both reference `issue.issue_id` (PRs are a kind
+  of issue in our schema; the kind distinguishes them).
+- `commit` references `commit_.commit_id`.
+- `comment` references `comment.comment_id`.
+- `review` references `review.review_id`.
+
+There is no SQL foreign key on (`target_kind`, `target_id`) because
+the target's table varies per row; integrity is maintained at the
+application level. Multiple rows per target are possible (one from
+`marker`, later one from `workflow_run`, etc.); analysis code that
+wants a single classification per artifact picks among them by source
+authority.
 
 ```
 classification_id   INTEGER PRIMARY KEY
-issue_id            INTEGER NOT NULL REFERENCES issue(issue_id)
+target_kind         TEXT NOT NULL              -- 'issue' | 'pr' | 'commit'
+                                               --   | 'comment' | 'review'
+target_id           INTEGER NOT NULL           -- references the appropriate source table
 source              TEXT NOT NULL              -- 'journal' | 'workflow_run' | 'marker' | 'unknown'
-producer            TEXT NOT NULL              -- e.g. 'copilot', 'auto-qa', 'aw-framework',
-                                               -- 'link-checker', 'typo-checker',
-                                               -- 'hive-scanner', 'human-credentialed',
-                                               -- 'unknown-bot'
-sub_producer        TEXT                       -- finer-grained when known
-confidence          REAL                       -- 0.0–1.0
-basis               TEXT                       -- short explanation: 'login=copilot[bot]',
-                                               -- 'title=[Auto-QA]', etc.
+producer            TEXT NOT NULL              -- e.g. 'human-credentialed',
+                                               -- 'copilot', 'hive-scanner',
+                                               -- 'hive-merger', 'project-bot',
+                                               -- 'other-bot-app', 'unknown'
+sub_producer        TEXT                       -- finer-grained: the matched login or email
+basis               TEXT                       -- short explanation:
+                                               --   'login=copilot[bot] (known)',
+                                               --   'email=scanner@kubestellar.io (known)', etc.
 classified_at       TIMESTAMP NOT NULL
 classifier_version  TEXT NOT NULL              -- so re-runs with new logic produce new rows
+UNIQUE (target_kind, target_id, source, classifier_version)
 ```
+
+Re-running the classifier with the same `classifier_version` deletes
+existing rows for that version (scoped to the repo being classified)
+and re-inserts; the UNIQUE constraint also enforces this at the
+schema level. Running with a new `classifier_version` adds new rows
+alongside the old, so verdicts from different rule sets can be
+compared.
 
 ### `extraction_state`
 

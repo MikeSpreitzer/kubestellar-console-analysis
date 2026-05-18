@@ -151,6 +151,31 @@ WAL/shm sidecar files even when the database itself is opened
 read-only; the analysis code uses a read-only connection internally
 and will not modify the database.
 
+## Running the classifier
+
+The classifier walks every subject repo's issues, PRs, commits,
+comments, and reviews, applies a shared rule list (see
+`src/classifier/rules.py`), and writes verdicts to the
+`producer_classification` table. Required before analyses that join
+to that table; the existing analysis modules also import from
+`src/classifier/rules` directly for inline credential classification
+during plotting.
+
+This is a write operation on the database, so the data mount is RW
+and we use the same UID-mapping pattern as the extractors:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      console-analysis \
+      -m src.classifier --config /config/config.yaml --verbose
+
+Re-running with the same `CLASSIFIER_VERSION` (defined at the top of
+`src/classifier/main.py`) replaces existing rows for that version.
+Re-running with a new version adds rows alongside; old verdicts are
+preserved so versions can be compared.
+
 ## Recovering from a halted run
 
 The extractors run a full SQLite integrity check at startup, after each

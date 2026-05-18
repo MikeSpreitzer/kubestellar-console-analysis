@@ -25,6 +25,7 @@ def test_imports():
     from src.extractor_git import git_cli, walker  # noqa: F401
     from src.analysis import first_look, drilldown, commit_authorship  # noqa: F401
     from src.analysis import _plotly_html  # noqa: F401
+    from src.classifier import adapters, main, record, rules  # noqa: F401
 
 
 def test_schema_applies():
@@ -308,6 +309,49 @@ def test_commit_authorship_ai_tool_detection():
     assert _trailer_names_ai_tool("", "") is False
 
 
+def test_classifier_rules_cover_known_cases():
+    """The shared classifier rules should produce expected verdicts
+    for the populations we've already observed in the data."""
+    from src.classifier.record import Record
+    from src.classifier.rules import (
+        CREDENTIAL_BOT, CREDENTIAL_HUMAN, CREDENTIAL_UNKNOWN,
+        PRODUCER_HIVE_MERGER, PRODUCER_HIVE_SCANNER, PRODUCER_COPILOT,
+        PRODUCER_HUMAN, PRODUCER_OTHER_BOT_APP, PRODUCER_PROJECT_BOT,
+        PRODUCER_UNKNOWN,
+        classify, credential_class_of,
+    )
+
+    def _classify(login=None, email=None):
+        v, _ = classify(Record(
+            target_kind="commit", target_id=0,
+            author_login=login, author_email=email, author_name=None,
+            created_at="",
+        ))
+        return v.producer
+
+    # Known logins
+    assert _classify(login="kubestellar-hive[bot]") == PRODUCER_HIVE_MERGER
+    assert _classify(login="copilot[bot]") == PRODUCER_COPILOT
+    # Generic [bot] login
+    assert _classify(login="dependabot[bot]") == PRODUCER_OTHER_BOT_APP
+    # Known emails
+    assert _classify(email="scanner@kubestellar.io") == PRODUCER_HIVE_SCANNER
+    assert _classify(email="copilot@github.com") == PRODUCER_COPILOT
+    assert _classify(email="ks-ci-bot@users.noreply.github.com") == PRODUCER_PROJECT_BOT
+    # Human
+    assert _classify(login="clubanderson",
+                     email="andy@clubanderson.com") == PRODUCER_HUMAN
+    assert _classify(email="mspreitz@us.ibm.com") == PRODUCER_HUMAN
+    # Unknown
+    assert _classify() == PRODUCER_UNKNOWN
+
+    # Coarse credential classes
+    assert credential_class_of(PRODUCER_HUMAN) == CREDENTIAL_HUMAN
+    assert credential_class_of(PRODUCER_UNKNOWN) == CREDENTIAL_UNKNOWN
+    assert credential_class_of(PRODUCER_HIVE_SCANNER) == CREDENTIAL_BOT
+    assert credential_class_of(PRODUCER_OTHER_BOT_APP) == CREDENTIAL_BOT
+
+
 def test_commit_authorship_classifies_commit():
     import math
     from src.analysis.commit_authorship import (
@@ -484,6 +528,7 @@ if __name__ == "__main__":
     test_hourly_checker_zero_interval_always_checks()
     test_connect_readonly_refuses_writes()
     test_first_look_classifies_login()
+    test_classifier_rules_cover_known_cases()
     test_commit_authorship_classifies_commit()
     test_commit_authorship_trailer_regex()
     test_commit_authorship_ai_tool_detection()

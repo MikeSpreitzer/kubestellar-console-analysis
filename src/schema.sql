@@ -297,20 +297,35 @@ CREATE INDEX IF NOT EXISTS idx_linked_pr_pr ON linked_pr(pr_id);
 -- Producer classification (output of layer 2)
 -- ----------------------------------------------------------------------
 
+-- One row per (target, source, classifier_version). The (target_kind,
+-- target_id) pair points into the appropriate source table -- 'issue'
+-- and 'pr' both reference issue.issue_id (PRs are a kind of issue in
+-- GitHub's data model and ours), 'commit' references commit_.commit_id,
+-- 'comment' references comment.comment_id, 'review' references
+-- review.review_id. There is no SQL foreign key because the target
+-- changes per row; integrity is maintained at the application level.
+--
+-- Re-running the classifier with the same classifier_version replaces
+-- existing rows for that version (via DELETE-then-INSERT in the
+-- application). Re-running with a new version adds new rows alongside
+-- the old, so verdicts from different versions can be compared
+-- directly.
 CREATE TABLE IF NOT EXISTS producer_classification (
     classification_id   INTEGER PRIMARY KEY,
-    issue_id            INTEGER NOT NULL REFERENCES issue(issue_id),
+    target_kind         TEXT NOT NULL CHECK (target_kind IN
+                            ('issue', 'pr', 'commit', 'comment', 'review')),
+    target_id           INTEGER NOT NULL,
     source              TEXT NOT NULL CHECK (source IN
                             ('journal', 'workflow_run', 'marker', 'unknown')),
     producer            TEXT NOT NULL,
     sub_producer        TEXT,
-    confidence          REAL,
     basis               TEXT,
     classified_at       TIMESTAMP NOT NULL,
-    classifier_version  TEXT NOT NULL
+    classifier_version  TEXT NOT NULL,
+    UNIQUE (target_kind, target_id, source, classifier_version)
 );
 
-CREATE INDEX IF NOT EXISTS idx_classification_issue ON producer_classification(issue_id);
+CREATE INDEX IF NOT EXISTS idx_classification_target ON producer_classification(target_kind, target_id);
 CREATE INDEX IF NOT EXISTS idx_classification_producer ON producer_classification(producer);
 CREATE INDEX IF NOT EXISTS idx_classification_version ON producer_classification(classifier_version);
 
