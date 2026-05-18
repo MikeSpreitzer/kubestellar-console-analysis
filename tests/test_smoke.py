@@ -24,6 +24,7 @@ def test_imports():
     )
     from src.extractor_git import git_cli, walker  # noqa: F401
     from src.analysis import first_look, drilldown, commit_authorship  # noqa: F401
+    from src.analysis import _plotly_html  # noqa: F401
 
 
 def test_schema_applies():
@@ -250,6 +251,63 @@ def test_first_look_classifies_login():
     assert _classify_login(None) == CREDENTIAL_UNKNOWN
 
 
+def test_commit_authorship_trailer_regex():
+    from src.analysis.commit_authorship import _COAUTHOR_RE
+
+    msg = (
+        "Fix the foo handler\n"
+        "\n"
+        "Body of the commit.\n"
+        "\n"
+        "Co-Authored-By: Claude <noreply@anthropic.com>\n"
+        "Co-authored-by: Alice <alice@example.com>\n"
+    )
+    matches = list(_COAUTHOR_RE.finditer(msg))
+    assert len(matches) == 2
+    assert matches[0].group("name") == "Claude"
+    assert matches[0].group("email") == "noreply@anthropic.com"
+    assert matches[1].group("name") == "Alice"
+    assert matches[1].group("email") == "alice@example.com"
+
+    # No trailer at all
+    matches = list(_COAUTHOR_RE.finditer("plain message\n"))
+    assert len(matches) == 0
+
+
+def test_commit_authorship_ai_tool_detection():
+    from src.analysis.commit_authorship import _trailer_names_ai_tool
+
+    # AI tools: should match
+    assert _trailer_names_ai_tool("Claude", "noreply@anthropic.com") is True
+    assert _trailer_names_ai_tool("GitHub Copilot", "copilot@github.com") is True
+    assert _trailer_names_ai_tool("Cursor", "noreply@cursor.so") is True
+    assert _trailer_names_ai_tool("dependabot[bot]", "x@y") is True
+    # Bare-bot/agent/assistant variants observed in real data
+    assert _trailer_names_ai_tool("Scanner Bot", "scanner@kubestellar.io") is True
+    assert _trailer_names_ai_tool("ks-ci-bot", "ks-ci-bot@users.noreply.github.com") is True
+    assert _trailer_names_ai_tool("Auto-QA Bot", "auto-qa@example.com") is True
+    assert _trailer_names_ai_tool("kubestellar-bot", "kubestellar-bot@kubestellar.io") is True
+    assert _trailer_names_ai_tool("kubestellar-hive", "hive-bot@kubestellar.io") is True
+    assert _trailer_names_ai_tool("tester-agent", "tester-agent@kubestellar.io") is True
+    assert _trailer_names_ai_tool("AI Assistant", "ai@example.com") is True
+    assert _trailer_names_ai_tool("GitHub Actions", "noreply@github.com") is True
+    # Bob is a known automation handle in this project (matched by
+    # the bob@example.com email rule, not the bare name).
+    assert _trailer_names_ai_tool("Bob", "bob@example.com") is True
+    # Humans: should not
+    assert _trailer_names_ai_tool("Mike Spreitzer", "mspreitz@us.ibm.com") is False
+    assert _trailer_names_ai_tool("Andy Anderson", "andy@clubanderson.com") is False
+    # Bob's name without the matching email should NOT match (we don't
+    # want every other "Bob" to be flagged as automation).
+    assert _trailer_names_ai_tool("Bob Smith", "bsmith@somewhere.com") is False
+    # Should not false-positive on words that contain bot/agent as
+    # substrings without word boundaries
+    assert _trailer_names_ai_tool("Robotics Inc", "robot@example.com") is False
+    assert _trailer_names_ai_tool("Agenda Maker", "agenda@example.com") is False
+    # Empty
+    assert _trailer_names_ai_tool("", "") is False
+
+
 def test_commit_authorship_classifies_commit():
     import math
     from src.analysis.commit_authorship import (
@@ -274,6 +332,50 @@ def test_commit_authorship_classifies_commit():
     assert _classify_commit(nan, nan) == CREDENTIAL_UNKNOWN
     assert _classify_commit(nan, "andy@clubanderson.com") == CREDENTIAL_HUMAN
     assert _classify_commit("dependabot[bot]", nan) == CREDENTIAL_BOT
+
+
+def test_plotly_html_writes_tab_title():
+    """write_html_with_title should produce an HTML file containing a
+    <title>...</title> with the given text."""
+    import tempfile
+    import plotly.graph_objects as go
+    from src.analysis._plotly_html import write_html_with_title
+
+    fig = go.Figure(data=[go.Scatter(x=[1, 2, 3], y=[4, 5, 6])])
+    with tempfile.TemporaryDirectory() as td:
+        out = Path(td) / "x.html"
+        write_html_with_title(fig, out, "My Tab Title")
+        text = out.read_text()
+        assert "<title>My Tab Title</title>" in text
+        # Special characters should be HTML-escaped.
+        out2 = Path(td) / "y.html"
+        write_html_with_title(fig, out2, "Issues opened (foo & bar)")
+        text2 = out2.read_text()
+        assert "<title>Issues opened (foo &amp; bar)</title>" in text2
+
+
+def test_commit_authorship_daily_counts_arbitrary_values():
+    """Regression: _daily_counts must work for classification columns
+    whose values are not the credential constants (e.g. the disclosure
+    constants used by disclosed_ai_collaboration).
+    """
+    import pandas as pd
+    from src.analysis.commit_authorship import _daily_counts
+
+    df = pd.DataFrame([
+        {"ts": "2026-01-01T00:00:00Z", "kind": "alpha"},
+        {"ts": "2026-01-01T00:00:00Z", "kind": "beta"},
+        {"ts": "2026-01-02T00:00:00Z", "kind": "alpha"},
+    ])
+    # No column_order: keep all groupby columns.
+    daily = _daily_counts(df, "ts", "kind")
+    assert "alpha" in daily.columns
+    assert "beta" in daily.columns
+    assert daily.loc[daily.index[0], "alpha"] == 1
+
+    # With column_order: respect it, drop unspecified columns.
+    daily = _daily_counts(df, "ts", "kind", column_order=["beta", "alpha"])
+    assert list(daily.columns) == ["beta", "alpha"]
 
 
 def test_first_look_daily_counts():
@@ -383,6 +485,10 @@ if __name__ == "__main__":
     test_connect_readonly_refuses_writes()
     test_first_look_classifies_login()
     test_commit_authorship_classifies_commit()
+    test_commit_authorship_trailer_regex()
+    test_commit_authorship_ai_tool_detection()
+    test_commit_authorship_daily_counts_arbitrary_values()
+    test_plotly_html_writes_tab_title()
     test_first_look_daily_counts()
     test_iso8601_timestamps_roundtrip()
     print("smoke tests passed")

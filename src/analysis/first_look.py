@@ -45,6 +45,7 @@ import plotly.graph_objects as go  # noqa: E402
 
 from ..common.config import load_config
 from ..common.db import connect_readonly
+from ._plotly_html import write_html_with_title
 
 
 log = logging.getLogger(__name__)
@@ -112,6 +113,7 @@ def _plot_stacked(
     title: str,
     out_path_png: Path,
     out_path_html: Path,
+    tab_title: str,
 ) -> None:
     """Render daily counts as a stacked area plot in both PNG and HTML.
 
@@ -163,11 +165,7 @@ def _plot_stacked(
         hovermode="x unified",
         template="plotly_white",
     )
-    plotly_fig.write_html(
-        str(out_path_html),
-        include_plotlyjs=True,  # embed JS so file is self-contained
-        full_html=True,
-    )
+    write_html_with_title(plotly_fig, out_path_html, tab_title)
     log.info("wrote %s", out_path_html)
 
 
@@ -312,55 +310,67 @@ def run_for_repo(
     html_dir = output_dir / "html" / safe_slug
     csv_dir = output_dir / "csv" / safe_slug
 
-    def _emit(stem: str, df: pd.DataFrame, ts_col: str, title: str) -> None:
+    def _emit(
+        stem: str, df: pd.DataFrame, ts_col: str,
+        title: str, tab_title: str,
+    ) -> None:
         daily = _daily_counts(df, ts_col, "credential")
         _save_csv(daily, csv_dir / f"{stem}.csv")
         _plot_stacked(
             daily, title,
             plots_dir / f"{stem}.png",
             html_dir / f"{stem}.html",
+            tab_title,
         )
 
-    log.info("[%s/%s] graph 1: issue authorship over time", owner, name)
+    repo_slug = f"{owner}/{name}"
+
+    log.info("[%s] graph 1: issue authorship over time", repo_slug)
     _emit(
         "issues_opened_by_credential",
         _issues_authored(conn, repo_id), "created_at",
-        f"{owner}/{name} -- issues opened per day, by author credential",
+        f"{repo_slug} -- issues opened per day, by author credential",
+        f"Issues opened ({name})",
     )
 
-    log.info("[%s/%s] graph 2: issue closer over time", owner, name)
+    log.info("[%s] graph 2: issue closer over time", repo_slug)
     _emit(
         "issues_closed_by_credential",
         _issues_closed(conn, repo_id), "closed_at",
-        f"{owner}/{name} -- issues closed per day, by closer credential",
+        f"{repo_slug} -- issues closed per day, by closer credential",
+        f"Issues closed ({name})",
     )
 
-    log.info("[%s/%s] graph 3: PR authorship over time", owner, name)
+    log.info("[%s] graph 3: PR authorship over time", repo_slug)
     _emit(
         "prs_opened_by_credential",
         _prs_authored(conn, repo_id), "created_at",
-        f"{owner}/{name} -- PRs opened per day, by author credential",
+        f"{repo_slug} -- PRs opened per day, by author credential",
+        f"PRs opened ({name})",
     )
 
-    log.info("[%s/%s] graph 4: PR merger over time", owner, name)
+    log.info("[%s] graph 4: PR merger over time", repo_slug)
     _emit(
         "prs_merged_by_credential",
         _prs_merged(conn, repo_id), "merged_at",
-        f"{owner}/{name} -- PRs merged per day, by merger credential",
+        f"{repo_slug} -- PRs merged per day, by merger credential",
+        f"PRs merged ({name})",
     )
 
-    log.info("[%s/%s] graph 5: comments on issues over time", owner, name)
+    log.info("[%s] graph 5: comments on issues over time", repo_slug)
     _emit(
         "issue_comments_by_credential",
         _comments_on(conn, repo_id, is_pr=False), "created_at",
-        f"{owner}/{name} -- comments on issues per day, by commenter credential",
+        f"{repo_slug} -- comments on issues per day, by commenter credential",
+        f"Issue comments ({name})",
     )
 
-    log.info("[%s/%s] graph 6: comments on PRs over time", owner, name)
+    log.info("[%s] graph 6: comments on PRs over time", repo_slug)
     _emit(
         "pr_comments_by_credential",
         _comments_on(conn, repo_id, is_pr=True), "created_at",
-        f"{owner}/{name} -- comments on PRs per day, by commenter credential",
+        f"{repo_slug} -- comments on PRs per day, by commenter credential",
+        f"PR comments ({name})",
     )
 
 

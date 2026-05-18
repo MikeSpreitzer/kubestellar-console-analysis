@@ -152,7 +152,7 @@ raise an OperationalError. The SQLite file itself is opened with
 ``mode=ro`` in the URI; the surrounding directory must remain
 filesystem-writable so SQLite can access WAL/shm sidecars.
 
-Output of layer 3, per plot:
+Output of layer 3, per plot, in the typical case:
 - A PNG (matplotlib) for paste-into-doc portability.
 - An HTML file (Plotly) with embedded JS, opening in any browser, for
   interactive exploration with precise hover values.
@@ -162,6 +162,19 @@ The three forms have parallel names under
 ``output/plots/<repo>/``, ``output/html/<repo>/``, and
 ``output/csv/<repo>/`` respectively, so any single chart's numbers are
 inspectable without re-running the analysis.
+
+A few plots produce **HTML and CSV only**, no PNG. Specifically the
+per-producer breakdowns -- ``bot_issue_producers`` in drilldown and
+``bot_commit_producers`` in commit_authorship -- are stacked over many
+bands (one per producer identity), and a static PNG with a busy stack
+is hard to read: you can't tell which band is which without a legend
+that doesn't fit, and you can't read exact values at all. The HTML
+remains useful because hover surfaces the band identity and value,
+and the CSV remains useful for direct inspection. Producing PNGs of
+these would create visually plausible but actually-not-useful
+artifacts. A future refinement would be to switch the per-producer
+plots to a small-multiples layout (one panel per producer) that
+renders well in both PNG and HTML.
 
 The analysis layer currently exposes three entry points:
 - ``src.analysis.first_look`` -- bot- vs. human-credential
@@ -215,9 +228,10 @@ revealed.** Mostly CSV tables; one stacked-area HTML plot.
 
 1. **Bot-opened-issue producers** -- per-bot-account issue creation,
    broken down by author login. CSV summary (login, total, first_seen,
-   last_seen) plus an HTML stacked-area of daily counts per login.
-   Surfaces which bot identities (auto-QA, link-checker, etc.) drive
-   the bot-credentialed share of issue creation.
+   last_seen) plus a stacked-area HTML plot of daily counts per login
+   (HTML-only; see the note above on per-producer plots not producing
+   PNGs). Surfaces which bot identities (auto-QA, link-checker, etc.)
+   drive the bot-credentialed share of issue creation.
 2. **Post-cutoff human PR authors** -- one row per
    human-credentialed PR opened on or after a configurable cutoff
    (default ``2026-05-03``). Plus a per-author summary. Identifies who,
@@ -234,10 +248,11 @@ pixellated reading of the first-look plots and should be refined as
 data accumulates.
 
 **``commit_authorship``: credential analysis at commit granularity,
-plus a join to PR identity.** Reads the git-extractor's ``commit_``
-table. Classification combines two signals: ``author_login`` ending in
-``[bot]`` (derived from GitHub noreply emails by the git extractor)
-and ``author_email`` matching a known bot-email allowlist (currently
+plus disclosed-AI-collaboration signals from commit messages.** Reads
+the git-extractor's ``commit_`` table. Credential classification
+combines two signals: ``author_login`` ending in ``[bot]`` (derived
+from GitHub noreply emails by the git extractor) and ``author_email``
+matching a known bot-email allowlist (currently
 ``copilot@github.com``, ``scanner@kubestellar.io``,
 ``reviewer@claude-dev.local`` -- maintained additively as new
 automation is observed).
@@ -247,17 +262,44 @@ automation is observed).
    as the first-look plots but at commit granularity.
 2. **PR vs. commit-author cross-tab** -- one row per merged PR with
    the PR's author credential, the merger credential, and the
-   credential of the author of the merge commit. Currently uses the
-   merge commit's authorship as a coarse proxy for "what produced the
-   PR's changes"; a future refinement would walk the PR's full commit
-   set. Output: a full per-PR CSV, a credential-cross-tab summary
-   CSV, and a CSV restricted to the most analytically interesting
-   cell (PR-author=bot but commit-author=human, the "developer used
-   a tool that pushed under their identity, then a bot opened the
-   PR" pattern).
+   credential of the author of the merge commit. Note: the merge
+   commit's author is a coarse proxy for "what produced the PR's
+   changes" -- for squash merges (the dominant pattern in console)
+   it is the merger, not the feature-branch authors. Treated as
+   exploratory. Output: a full per-PR CSV, a credential-cross-tab
+   summary CSV, and a CSV restricted to the cell originally framed
+   as analytically interesting (PR-author=bot,
+   commit-author=human); on console this cell turned out to capture
+   only the squash-merge artifact, not the broader pattern, so the
+   CSV is small and primarily diagnostic.
 3. **Bot-author commit producers** -- daily counts per bot login or
-   bot-email producer (PNG-equivalent HTML + CSV summary), parallel
-   to drilldown's ``bot_issue_producers``.
+   bot-email producer (HTML-only plot plus CSV summary; see the note
+   above on per-producer plots not producing PNGs), parallel to
+   drilldown's ``bot_issue_producers``.
+4. **Co-Authored-By trailer enumeration** -- one row per
+   (commit, trailer) pair, plus a per-trailer-identity summary.
+   Lets us discover which AI tools and identities have left
+   disclosed traces in commit messages. The classification of
+   trailer names/emails as "AI tool" uses a regex list with
+   word-boundary semantics: specific tool/vendor names (``claude``,
+   ``anthropic``, ``copilot``, ``cursor``, ``cody``, ``codeium``,
+   ``aider``); generic automation markers (bare and hyphen-suffix
+   forms of ``bot``, ``agent``; the GitHub-app ``[bot]`` form;
+   ``assistant``); and a small set of project-specific identities
+   (``kubestellar-hive``, ``kubestellar-bot``,
+   ``scanner@kubestellar.io``, ``auto-qa``, ``GitHub Actions``,
+   ``bob@example.com``). Word boundaries prevent false-positives on
+   ``robotics``, ``agenda``, etc. The list is additive: when the
+   enumeration CSV reveals an automation identity that isn't yet
+   matched, add a regex for it.
+5. **Disclosed-AI-collaboration time series** -- daily counts of
+   commits split by whether the message discloses an AI tool via
+   Co-Authored-By, vs. those that do not. The disclosed share is a
+   *lower bound* on AI-assisted commits within the human-credentialed
+   bucket: commits whose tool involvement was undisclosed (trailer
+   omitted or stripped) are indistinguishable from hand-typed
+   commits at the metadata level. Useful for tracking era
+   transitions in a project's adoption of AI-assisted development.
 
 ### Layer 4 — interpretation (out of scope for code)
 

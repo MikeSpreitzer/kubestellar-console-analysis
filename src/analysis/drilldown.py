@@ -47,6 +47,7 @@ import plotly.graph_objects as go  # noqa: E402
 
 from ..common.config import load_config
 from ..common.db import connect_readonly
+from ._plotly_html import write_html_with_title
 
 
 log = logging.getLogger(__name__)
@@ -65,6 +66,7 @@ def bot_issue_producers(
     repo_id: int,
     output_dir: Path,
     safe_slug: str,
+    repo_name: str,
 ) -> None:
     """Group bot-opened issues by author login.
 
@@ -135,7 +137,9 @@ def bot_issue_producers(
         hovermode="x unified",
         template="plotly_white",
     )
-    fig.write_html(str(html_path), include_plotlyjs=True, full_html=True)
+    write_html_with_title(
+        fig, html_path, f"Bot issue producers ({repo_name})",
+    )
     log.info("wrote %s", html_path)
 
 
@@ -257,7 +261,7 @@ def run_for_repo(
     safe_slug = f"{owner}_{name}"
 
     log.info("[%s/%s] (1) bot issue producers", owner, name)
-    bot_issue_producers(conn, repo_id, output_dir, safe_slug)
+    bot_issue_producers(conn, repo_id, output_dir, safe_slug, name)
 
     log.info("[%s/%s] (2) post-%s human PR authors", owner, name, cutoff)
     post_cutoff_human_pr_authors(conn, repo_id, cutoff, output_dir, safe_slug)

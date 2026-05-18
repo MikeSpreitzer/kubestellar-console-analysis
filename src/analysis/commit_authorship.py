@@ -4,24 +4,34 @@
 
 """Commit-authorship analysis.
 
-Three artifacts:
+Five artifacts:
 
 1. Per-commit credential mix over time, daily-binned. Parallels
    first_look's PR/issue plots but at commit granularity. PNG + HTML
    + CSV per repo.
 
 2. PR-vs-commit-author cross-tab. For each PR, lists the PR's author
-   credential, the merger credential, and the set of distinct commit
-   authors inside the PR's merge commit. Surfaces the case of a bot-
-   opened PR whose commits were authored by a human (e.g. Andy using
-   Claude Code locally and pushing commits, with a bot opening the
-   PR).
+   credential, the merger credential, and the credential of the
+   merge-commit's author. Note: the merge-commit author is a coarse
+   proxy for "who produced the PR's changes" -- for squash merges it
+   is the merger, not the feature-branch authors. Treated as
+   exploratory, not authoritative.
 
 3. Per-bot-email producer plot. Daily counts of commits authored under
-   each known bot email (currently copilot@github.com,
-   scanner@kubestellar.io, reviewer@claude-dev.local). Surfaces when
-   each automation came online and how much of the commit stream each
-   accounts for.
+   each known bot login or bot email. Surfaces when each automation
+   came online and how much of the commit stream each accounts for.
+
+4. ``Co-Authored-By`` trailer enumeration. Every commit whose message
+   contains at least one Co-Authored-By trailer, with the full trailer
+   text. Lets us discover which tools and identities have left
+   disclosed traces of AI-assisted commits.
+
+5. Disclosed-AI-collaboration time series. Daily counts of commits
+   whose message discloses at least one AI tool via Co-Authored-By,
+   versus those that do not. The disclosed share is a *lower bound*
+   on AI-assisted commits within the human-credentialed bucket;
+   commits where the trailer was omitted or stripped are
+   indistinguishable from hand-typed commits at the metadata level.
 
 Credential classification combines two signals:
 - ``author_login`` ending in ``[bot]`` (derived from GitHub noreply
@@ -31,13 +41,19 @@ Credential classification combines two signals:
 This is still a credential classification, not a producer
 classification. Human-credentialed commits remain an upper bound on
 actual hand-typed work; tools that commit under a developer's real
-email are not detectable from email alone.
+email (e.g. an agent running on a developer's workstation, with the
+developer's git identity) are not detectable from email alone. The
+``Co-Authored-By`` artifacts above produce a partial complementary
+signal -- a lower bound on disclosed AI collaboration within the
+human-credentialed bucket -- but cannot detect AI-assisted commits
+that did not include a trailer.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -53,6 +69,7 @@ import plotly.graph_objects as go  # noqa: E402
 
 from ..common.config import load_config
 from ..common.db import connect_readonly
+from ._plotly_html import write_html_with_title
 
 
 log = logging.getLogger(__name__)
@@ -81,6 +98,69 @@ BOT_AUTHOR_EMAILS = frozenset({
 })
 
 
+# Regex for Co-Authored-By trailers. Git convention: one or more
+# lines like ``Co-authored-by: Name <email>`` typically near the end
+# of a commit message. Case-insensitive; allows both hyphen and space
+# variants in case anyone deviates from the canonical form.
+_COAUTHOR_RE = re.compile(
+    r"^\s*co[-\s]authored[-\s]by\s*:\s*(?P<name>.+?)\s*<(?P<email>[^>]+)>\s*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+# Regex patterns that, when matched against a Co-Authored-By
+# trailer's name or email (lowercased), indicate the trailer is
+# disclosing an AI or automation tool.
+#
+# Maintained additively. Iterate by inspecting
+# ``coauthored_by_summary.csv``: any trailer that should be flagged
+# but isn't gets a pattern added here.
+#
+# We use word-boundary or suffix matching where the bare word would
+# false-positive (``bot`` in ``robot``, ``agent`` in ``urgent``, etc.).
+# Specific known identities (``ks-ci-bot``, ``kubestellar-hive``,
+# ``scanner@kubestellar.io``) are listed explicitly.
+_AI_TOOL_REGEXES = tuple(re.compile(p) for p in [
+    # Specific tool/vendor names.
+    r"\bclaude\b",          # Anthropic Claude
+    r"\banthropic\b",       # noreply@anthropic.com
+    r"\bcopilot\b",         # GitHub Copilot
+    r"\bcursor\b",          # Cursor
+    r"\bcody\b",            # Sourcegraph Cody
+    r"\bcodeium\b",         # Codeium
+    r"\baider\b",           # Aider
+    # Bot/agent/assistant markers, bounded so we don't false-positive
+    # on words like robot/agendas/assistance.
+    r"\[bot\]",             # GitHub App login form
+    r"\bbot\b",             # bare "Bot" word (e.g. "Auto-QA Bot")
+    r"-bot\b",              # hyphen-suffix bots (e.g. "ks-ci-bot")
+    r"\bagent\b",           # bare "Agent" word
+    r"-agent\b",            # hyphen-suffix agents (e.g. "tester-agent")
+    r"\bassistant\b",       # "AI Assistant"
+    # Known kubestellar-org automation identities. Listed explicitly
+    # because "kubestellar-hive" and "scanner@kubestellar.io" don't
+    # match any of the generic patterns above.
+    r"\bkubestellar-hive\b",
+    r"\bkubestellar-bot\b",
+    r"\bscanner@kubestellar\.io\b",
+    r"\bauto-qa\b",
+    r"\bgithub actions\b",  # the "GitHub Actions" actor name
+    # Other known automation handles in this project. The trailer name
+    # "Bob" alone would be too short and ambiguous as a generic pattern
+    # (every "bobby" or "bob's email" would false-positive), so we
+    # match a more specific form: the email "bob@example.com" with
+    # which it has actually appeared.
+    r"\bbob@example\.com\b",
+])
+
+
+def _trailer_names_ai_tool(name: str, email: str) -> bool:
+    """Return True if a Co-Authored-By trailer's name/email suggests
+    an AI or automation tool."""
+    haystack = f"{name} {email}".lower()
+    return any(p.search(haystack) for p in _AI_TOOL_REGEXES)
+
+
 def _classify_commit(login: Optional[str], email: Optional[str]) -> str:
     # Coerce pandas NaN (a float) and any other non-string null value
     # to None. SQLite stores NULL; pandas reads it back as NaN by
@@ -107,7 +187,16 @@ def _daily_counts(
     df: pd.DataFrame,
     timestamp_col: str,
     classification_col: str,
+    column_order: Optional[list[str]] = None,
 ) -> pd.DataFrame:
+    """Group rows by UTC day of timestamp_col and classification_col.
+
+    If ``column_order`` is given, output columns are placed in that
+    order (omitting values not present in the data, never adding
+    values not present in ``column_order``). If ``column_order`` is
+    None, columns are returned in pandas' default order (which is
+    alphabetical for unstacked groupby).
+    """
     if df.empty:
         return pd.DataFrame()
     df = df.copy()
@@ -120,10 +209,9 @@ def _daily_counts(
           .unstack(fill_value=0)
           .sort_index()
     )
-    cols_in_pref = [
-        c for c in [CREDENTIAL_HUMAN, CREDENTIAL_BOT, CREDENTIAL_UNKNOWN]
-        if c in grouped.columns
-    ]
+    if column_order is None:
+        return grouped
+    cols_in_pref = [c for c in column_order if c in grouped.columns]
     return grouped[cols_in_pref]
 
 
@@ -138,6 +226,7 @@ def _plot_stacked(
     title: str,
     out_path_png: Path,
     out_path_html: Path,
+    tab_title: str,
     color_map: Optional[dict[str, str]] = None,
 ) -> None:
     if daily.empty:
@@ -184,7 +273,7 @@ def _plot_stacked(
         hovermode="x unified",
         template="plotly_white",
     )
-    fig.write_html(str(out_path_html), include_plotlyjs=True, full_html=True)
+    write_html_with_title(fig, out_path_html, tab_title)
     log.info("wrote %s", out_path_html)
 
 
@@ -197,6 +286,7 @@ def commits_by_credential(
     repo_id: int,
     output_dir: Path,
     safe_slug: str,
+    repo_name: str,
 ) -> None:
     rows = conn.execute(
         """
@@ -214,7 +304,10 @@ def commits_by_credential(
         lambda r: _classify_commit(r["author_login"], r["author_email"]),
         axis=1,
     )
-    daily = _daily_counts(df, "authored_at", "credential")
+    daily = _daily_counts(
+        df, "authored_at", "credential",
+        column_order=[CREDENTIAL_HUMAN, CREDENTIAL_BOT, CREDENTIAL_UNKNOWN],
+    )
     _save_csv(
         daily,
         output_dir / "csv" / safe_slug / "commits_by_credential.csv",
@@ -224,6 +317,7 @@ def commits_by_credential(
         f"{safe_slug} -- commits authored per day, by author credential",
         output_dir / "plots" / safe_slug / "commits_by_credential.png",
         output_dir / "html" / safe_slug / "commits_by_credential.html",
+        tab_title=f"Commits ({repo_name})",
     )
 
 
@@ -349,6 +443,7 @@ def bot_email_producers(
     repo_id: int,
     output_dir: Path,
     safe_slug: str,
+    repo_name: str,
 ) -> None:
     """Daily counts per bot email + per [bot]-suffixed login. Same
     shape as drilldown.bot_issue_producers but for commits.
@@ -430,8 +525,143 @@ def bot_email_producers(
         hovermode="x unified",
         template="plotly_white",
     )
-    fig.write_html(str(html_path), include_plotlyjs=True, full_html=True)
+    write_html_with_title(
+        fig, html_path, f"Bot commit producers ({repo_name})",
+    )
     log.info("wrote %s", html_path)
+
+
+# ----------------------------------------------------------------------
+# 4. Co-Authored-By trailer enumeration
+# ----------------------------------------------------------------------
+
+def coauthored_by_trailers(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    output_dir: Path,
+    safe_slug: str,
+) -> None:
+    """Scan commit messages for Co-Authored-By trailers, write one row
+    per (commit, trailer) to a CSV. Multiple trailers on a single
+    commit produce multiple rows.
+    """
+    rows = conn.execute(
+        """
+        SELECT sha, authored_at, author_email, message
+        FROM commit_
+        WHERE repo_id = ?
+        """,
+        (repo_id,),
+    ).fetchall()
+    out_rows: list[dict] = []
+    for r in rows:
+        msg = r["message"] or ""
+        for m in _COAUTHOR_RE.finditer(msg):
+            name = (m.group("name") or "").strip()
+            email = (m.group("email") or "").strip()
+            out_rows.append({
+                "sha": r["sha"],
+                "authored_at": r["authored_at"],
+                "author_email": r["author_email"],
+                "trailer_name": name,
+                "trailer_email": email,
+                "is_ai_tool": _trailer_names_ai_tool(name, email),
+            })
+    df = pd.DataFrame(out_rows)
+    csv_path = output_dir / "csv" / safe_slug / "coauthored_by_trailers.csv"
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(csv_path, index=False)
+    log.info("wrote %s (%d trailer rows from commits)", csv_path, len(df))
+
+    if df.empty:
+        return
+
+    # Per-trailer-identity summary, sorted by frequency.
+    summary = (
+        df.groupby(["trailer_email", "trailer_name", "is_ai_tool"])
+          .size().reset_index(name="total")
+          .sort_values("total", ascending=False)
+    )
+    summary_path = output_dir / "csv" / safe_slug / "coauthored_by_summary.csv"
+    summary.to_csv(summary_path, index=False)
+    log.info("wrote %s (%d distinct trailer identities)", summary_path, len(summary))
+
+
+# ----------------------------------------------------------------------
+# 5. Disclosed AI-collaboration time series
+# ----------------------------------------------------------------------
+
+DISCLOSURE_AI = "discloses-ai-coauthor"
+DISCLOSURE_NONE = "no-ai-coauthor"
+
+DISCLOSURE_COLORS = {
+    DISCLOSURE_AI: "#d62728",     # same red as bot-credentialed
+    DISCLOSURE_NONE: "#1f77b4",   # same blue as human-credentialed
+}
+
+
+def disclosed_ai_collaboration(
+    conn: sqlite3.Connection,
+    repo_id: int,
+    output_dir: Path,
+    safe_slug: str,
+    repo_name: str,
+) -> None:
+    """Daily count of commits split by whether the message discloses
+    an AI tool via a Co-Authored-By trailer.
+
+    Notes:
+    - This counts each commit at most once. A commit with multiple
+      Co-Authored-By trailers, at least one naming an AI tool, counts
+      as ``DISCLOSURE_AI``.
+    - The disclosed share is a *lower bound* on AI-assisted commits.
+      Commits whose tool involvement was undisclosed (trailer omitted
+      or stripped) appear in ``DISCLOSURE_NONE`` indistinguishably
+      from hand-typed commits.
+    """
+    rows = conn.execute(
+        """
+        SELECT authored_at, message
+        FROM commit_
+        WHERE repo_id = ?
+        """,
+        (repo_id,),
+    ).fetchall()
+    if not rows:
+        return
+
+    records = []
+    for r in rows:
+        msg = r["message"] or ""
+        discloses = False
+        for m in _COAUTHOR_RE.finditer(msg):
+            name = (m.group("name") or "").strip()
+            email = (m.group("email") or "").strip()
+            if _trailer_names_ai_tool(name, email):
+                discloses = True
+                break
+        records.append({
+            "authored_at": r["authored_at"],
+            "disclosure": DISCLOSURE_AI if discloses else DISCLOSURE_NONE,
+        })
+    df = pd.DataFrame(records)
+    daily = _daily_counts(
+        df, "authored_at", "disclosure",
+        column_order=[DISCLOSURE_NONE, DISCLOSURE_AI],
+    )
+
+    _save_csv(
+        daily,
+        output_dir / "csv" / safe_slug / "disclosed_ai_collaboration.csv",
+    )
+    _plot_stacked(
+        daily,
+        f"{safe_slug} -- commits per day, by AI-tool disclosure in Co-Authored-By",
+        output_dir / "plots" / safe_slug / "disclosed_ai_collaboration.png",
+        output_dir / "html" / safe_slug / "disclosed_ai_collaboration.html",
+        tab_title=f"AI co-author disclosure ({repo_name})",
+        color_map=DISCLOSURE_COLORS,
+    )
 
 
 # ----------------------------------------------------------------------
@@ -455,13 +685,19 @@ def run_for_repo(
     safe_slug = f"{owner}_{name}"
 
     log.info("[%s/%s] (1) commits by credential over time", owner, name)
-    commits_by_credential(conn, repo_id, output_dir, safe_slug)
+    commits_by_credential(conn, repo_id, output_dir, safe_slug, name)
 
     log.info("[%s/%s] (2) PR vs commit-author cross-tab", owner, name)
     pr_vs_commit_authors(conn, repo_id, output_dir, safe_slug)
 
     log.info("[%s/%s] (3) bot-email commit producers", owner, name)
-    bot_email_producers(conn, repo_id, output_dir, safe_slug)
+    bot_email_producers(conn, repo_id, output_dir, safe_slug, name)
+
+    log.info("[%s/%s] (4) Co-Authored-By trailer enumeration", owner, name)
+    coauthored_by_trailers(conn, repo_id, output_dir, safe_slug)
+
+    log.info("[%s/%s] (5) disclosed-AI-collaboration time series", owner, name)
+    disclosed_ai_collaboration(conn, repo_id, output_dir, safe_slug, name)
 
 
 def _setup_logging(verbose: bool) -> None:
