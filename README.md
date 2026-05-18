@@ -163,6 +163,14 @@ If the snapshot itself is also corrupt, `sqlite3 <db> ".recover"` can
 extract intact pages into a fresh database; see SQLite's documentation
 for details.
 
+Why a halt might happen: the database lives on a host-bind-mounted
+filesystem inside the container (e.g. Rancher Desktop's virtiofs
+layer), and SQLite warns that filesystems with imperfect locking or
+fsync semantics can corrupt a database, particularly during WAL
+checkpoints. See DESIGN.md for the full story and the structural fix
+(moving the database to a Docker named volume) that's available if
+the partial mitigations stop sufficing.
+
 ## Running tests
 
 The smoke tests verify imports succeed, the schema applies cleanly to an

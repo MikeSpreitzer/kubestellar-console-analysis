@@ -73,18 +73,33 @@ interpretation, no classification, no derived metrics.
 
 ### Database integrity defenses
 
-The first long extraction run produced SQLite corruption mid-run, with no
-clear root cause (possibly the bind-mounted filesystem layer of Rancher
-Desktop under high concurrent I/O during the artifacts-fetch phase, or
-something we have not pinned down). The pipeline now defends against
-recurrence with several measures, applied to both extractors:
+Two long extraction runs against the bind-mounted SQLite database
+produced localized b-tree corruption mid-run. In each case the damage
+was confined to a single tree (the table being most aggressively
+written at the time), which is consistent with the failure modes
+SQLite documents on filesystems whose locking or fsync semantics
+cannot be fully trusted -- see SQLite's
+[How To Corrupt An SQLite Database File](https://www.sqlite.org/howtocorrupt.html),
+which calls out network and otherwise-virtualized filesystems
+explicitly. Rancher Desktop's host-bind-mount layer (virtiofs or
+reverse-sshfs depending on configuration) is conceptually similar: a
+layered filesystem whose semantics are implemented by the
+virtualization stack rather than directly by the host's native
+filesystem. We did not pin the root cause to a specific bug; the
+behavior fits the pattern.
+
+The pipeline defends against recurrence with several measures, applied
+to both extractors:
 
 - **`PRAGMA synchronous = FULL`** so every commit waits for fsync,
   reducing risk from partial writes during an unclean exit.
 - **`PRAGMA journal_mode = WAL`** with **periodic
   `wal_checkpoint(TRUNCATE)`** at phase boundaries and inside long
   per-item loops, keeping the WAL small so less unflushed state is at
-  risk at any moment.
+  risk at any moment. (Note: SQLite identifies WAL checkpoints as the
+  one operation in WAL mode where unreliable fsync can still cause
+  corruption, so periodic checkpointing is a partial mitigation, not
+  a full one, on a filesystem whose fsync we don't fully trust.)
 - **`VACUUM INTO`** snapshots before each phase, kept under
   `data/snapshots/`, so if a phase corrupts the database we have a
   clean pre-phase copy to fall back to.
@@ -92,6 +107,13 @@ recurrence with several measures, applied to both extractors:
   phase, and at most once per hour during long phases (via an
   `HourlyChecker` helper). Any failure halts the extractor with a clear
   error message pointing at the snapshot for recovery.
+
+The defenses above are partial mitigations. The structural fix --
+moving the SQLite database off the bind-mounted filesystem entirely --
+is described under "Open design questions" below; it is not yet
+implemented because the current workload (with logs and artifacts
+disabled) appears to fit within whatever threshold these mitigations
+cover. If corruption recurs, that's the trigger to do the migration.
 
 These defenses are extractor-layer concerns; the schema is unchanged
 by them.
@@ -511,20 +533,20 @@ preserved here so future re-runs follow the same conventions:
   infra as a parallel time series of state for this reason.
 - **Log fetching deferred.** Two attempts at fetching workflow run logs
   produced SQLite database corruption mid-run (different b-trees damaged
-  on different runs, but always during the logs-fetch phase). Root cause
-  was not pinned down; the most plausible suspect is a Rancher Desktop
-  virtiofs interaction with concurrent writes during high-frequency
-  UPDATEs on the `workflow_run` table, but this is unproven. Rather than
-  continue debugging the I/O storm, the pipeline currently defaults to
+  on different runs, but always during the logs-fetch phase). The
+  failure mode -- localized b-tree damage to whichever table was being
+  most aggressively written at the time -- is consistent with SQLite's
+  documented warnings about layered/virtualized filesystems whose
+  locking or fsync semantics may be unreliable; see "Database integrity
+  defenses" above. The pipeline currently defaults to
   `fetch_logs: false`. Run metadata (workflow_path, workflow_name,
   actor, event, conclusion, head_sha, timestamps) is fully captured and
   is sufficient for the human/agent characterization the analysis is
-  initially targeting. If the analysis later requires log content,
-  candidate next steps are: lower fetch concurrency to 1; move the
-  SQLite database to a non-virtiofs filesystem (e.g. a Docker named
-  volume on the VM's native ext4) while keeping log files on the bind
-  mount; or fetch logs as a fully separate process that does not touch
-  SQLite at all and reconciles after.
+  initially targeting. If the analysis later requires log content, the
+  candidate fixes -- in increasing order of disruption -- are: lower
+  fetch concurrency to 1; fetch logs as a separate process that does
+  not touch SQLite at all and reconciles after; or do the
+  named-volume migration described under "Open design questions".
 
 ## Re-running the analysis
 
@@ -543,6 +565,27 @@ intermediate steps should also be invocable individually for development.
 
 ## Open design questions
 
+- **Move the SQLite database off the bind-mounted filesystem.** SQLite
+  documents that broken locking or unreliable fsync on the underlying
+  filesystem can corrupt the database, and explicitly identifies WAL
+  checkpoints as the one operation in WAL mode where unreliable fsync
+  can still cause corruption (see
+  [How To Corrupt An SQLite Database File](https://www.sqlite.org/howtocorrupt.html)).
+  Docker's own guidance recommends named volumes -- which live on the
+  VM's native ext4 rather than going through the host-bind-mount layer
+  -- as the preferred mechanism for performance-sensitive persistent
+  data (see [Docker volumes documentation](https://docs.docker.com/engine/storage/volumes/)).
+  Migration shape: the database lives in a Docker named volume mounted
+  at a fixed in-container path; the bind-mounted `data/` keeps the
+  on-disk file artifacts (`gh_runs/`, snapshots) and the analysis
+  outputs. Host-side inspection of the database happens by either
+  `docker cp` of a snapshot, or a separate read-only inspection
+  invocation that mounts the volume into a short-lived container.
+  This is the structural fix to the corruption issues we hit; not yet
+  implemented because the current workload appears to fit within what
+  the partial mitigations cover. Triggers for doing the migration:
+  another corruption recurrence, or a decision to enable log fetching
+  again.
 - **How to publish the data.** The sqlite database may be useful to
   share with collaborators (Andy, the paper's author, anyone reproducing
   results). Sharing arrangement TBD.
