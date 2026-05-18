@@ -35,7 +35,15 @@ log = logging.getLogger(__name__)
 
 # Bump when rules change. Use a short tag identifying the change.
 # rules_signature() guards against forgetting; see check_signature().
-CLASSIFIER_VERSION = "v1"
+#
+# Version history:
+#   v1 -- initial rule set: copilot, hive-{scanner,reviewer,merger},
+#         project-bot, other-bot-app catch-all, default-human, unknown.
+#   v2 -- add explicit producers for prow, netlify, dependabot, and
+#         claude-app; add copilot-swe-agent[bot] under copilot; add
+#         kubestellar-console-bot[bot] under project-bot. github-actions
+#         remains in other-bot-app pending content-based splitting.
+CLASSIFIER_VERSION = "v2"
 
 # Source value written to producer_classification. The schema reserves
 # 'journal' and 'workflow_run' for future enrichment from those data

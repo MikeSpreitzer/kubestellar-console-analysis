@@ -176,6 +176,66 @@ Re-running with the same `CLASSIFIER_VERSION` (defined at the top of
 Re-running with a new version adds rows alongside; old verdicts are
 preserved so versions can be compared.
 
+### Inspecting the classifier output
+
+The classifier writes one row per `(target_kind, target_id, source,
+classifier_version)` tuple to the
+[`producer_classification`](SCHEMA.md#producer_classification) table.
+A few example queries (run on the host with `sqlite3 data/db.sqlite`;
+substitute `'v2'` with whatever version the classifier last ran with):
+
+Producer breakdown across all artifact kinds:
+
+    SELECT producer, COUNT(*) n
+    FROM producer_classification
+    WHERE classifier_version = 'v2'
+    GROUP BY producer
+    ORDER BY n DESC;
+
+Producer breakdown for one kind:
+
+    SELECT producer, COUNT(*) n
+    FROM producer_classification
+    WHERE classifier_version = 'v2' AND target_kind = 'pr'
+    GROUP BY producer
+    ORDER BY n DESC;
+
+Sub-producer detail within `other-bot-app`:
+
+    SELECT sub_producer, COUNT(*) n
+    FROM producer_classification
+    WHERE classifier_version = 'v2' AND producer = 'other-bot-app'
+    GROUP BY sub_producer
+    ORDER BY n DESC;
+
+Compare two classifier versions on the same artifact:
+
+    SELECT v1.producer AS v1_producer, v2.producer AS v2_producer, COUNT(*) n
+    FROM producer_classification v1
+    JOIN producer_classification v2
+      ON v1.target_kind = v2.target_kind
+     AND v1.target_id = v2.target_id
+     AND v1.source = v2.source
+    WHERE v1.classifier_version = 'v1' AND v2.classifier_version = 'v2'
+    GROUP BY v1.producer, v2.producer
+    ORDER BY n DESC;
+
+Join classification back to the source artifact (PRs example):
+
+    SELECT i.number, i.title, pc.producer, pc.sub_producer
+    FROM issue i
+    JOIN producer_classification pc
+      ON pc.target_kind = 'pr' AND pc.target_id = i.issue_id
+    WHERE i.is_pr = 1
+      AND pc.classifier_version = 'v2'
+      AND pc.producer = 'hive-merger'
+    LIMIT 20;
+
+The other artifact kinds use `target_kind = 'issue'`, `'commit'`,
+`'comment'`, or `'review'` and join to the corresponding source
+table (see [`SCHEMA.md`](SCHEMA.md) for which key field each
+`target_id` references).
+
 ## Recovering from a halted run
 
 The extractors run a full SQLite integrity check at startup, after each

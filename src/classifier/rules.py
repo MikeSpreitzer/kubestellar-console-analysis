@@ -15,17 +15,30 @@ The producer taxonomy values used here are:
   detectably an automation. Upper bound on actual human work; humans
   may run automation under their own credentials, in which case the
   artifact is misclassified as human.
-- ``copilot`` -- GitHub Copilot dispatched as automation.
+- ``copilot`` -- GitHub Copilot dispatched as automation. Includes
+  related logins like ``copilot-pull-request-reviewer[bot]`` and
+  ``copilot-swe-agent[bot]``; the specific login is preserved in
+  ``sub_producer``.
+- ``claude-app`` -- the ``claude[bot]`` GitHub App identity.
+- ``prow`` -- the ``kubestellar-prow[bot]`` actor (labeler,
+  APPROVALNOTIFIER, label events).
+- ``netlify`` -- the ``netlify[bot]`` actor (deploy-preview comments).
+- ``dependabot`` -- the ``dependabot[bot]`` actor.
 - ``hive-scanner`` -- hive's scanner sub-agent.
 - ``hive-reviewer`` -- the Claude-driven reviewer that committed under
   ``reviewer@claude-dev.local``. (We do not have a dedicated GitHub
   app login for this; the email is the only signal.)
 - ``hive-merger`` -- the kubestellar-hive[bot] App when seen merging.
 - ``other-bot-app`` -- any GitHub App login ending in ``[bot]`` that
-  isn't more specifically classified above.
+  isn't more specifically classified above. Currently dominated by
+  ``github-actions[bot]``, which is the runner identity for any
+  workflow that posts/comments/files things; splitting that further
+  requires content-based signals (workflow name, comment body
+  parsing) that the classifier does not yet consume.
 - ``project-bot`` -- one of the kubestellar-org bot identities seen in
-  Co-Authored-By trailers but not on GitHub-app logins (e.g.
-  ``ks-ci-bot``, ``kubestellar-bot``, ``auto-qa``).
+  Co-Authored-By trailers or in non-noreply emails (e.g.
+  ``ks-ci-bot``, ``kubestellar-bot``, ``auto-qa``,
+  ``kubestellar-console-bot``).
 - ``unknown`` -- the artifact has no actor identity at all.
 
 Sub-producers carry finer detail when the rule resolves it (e.g. the
@@ -53,6 +66,10 @@ from .record import Record
 PRODUCER_HUMAN = "human-credentialed"
 PRODUCER_UNKNOWN = "unknown"
 PRODUCER_COPILOT = "copilot"
+PRODUCER_CLAUDE_APP = "claude-app"
+PRODUCER_PROW = "prow"
+PRODUCER_NETLIFY = "netlify"
+PRODUCER_DEPENDABOT = "dependabot"
 PRODUCER_HIVE_SCANNER = "hive-scanner"
 PRODUCER_HIVE_REVIEWER = "hive-reviewer"
 PRODUCER_HIVE_MERGER = "hive-merger"
@@ -89,9 +106,15 @@ EMAIL_TO_PRODUCER: dict[str, str] = {
 # Specific known bot logins -> producer label. Logins ending in
 # ``[bot]`` that don't appear here fall through to PRODUCER_OTHER_BOT_APP.
 LOGIN_TO_PRODUCER: dict[str, str] = {
-    "copilot[bot]":                  PRODUCER_COPILOT,
+    "copilot[bot]":                       PRODUCER_COPILOT,
     "copilot-pull-request-reviewer[bot]": PRODUCER_COPILOT,
-    "kubestellar-hive[bot]":         PRODUCER_HIVE_MERGER,
+    "copilot-swe-agent[bot]":             PRODUCER_COPILOT,
+    "claude[bot]":                        PRODUCER_CLAUDE_APP,
+    "kubestellar-hive[bot]":              PRODUCER_HIVE_MERGER,
+    "kubestellar-prow[bot]":              PRODUCER_PROW,
+    "netlify[bot]":                       PRODUCER_NETLIFY,
+    "dependabot[bot]":                    PRODUCER_DEPENDABOT,
+    "kubestellar-console-bot[bot]":       PRODUCER_PROJECT_BOT,
 }
 
 

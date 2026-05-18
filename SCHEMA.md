@@ -481,10 +481,13 @@ deferred constraints:
 
 - **No log content.** Stored as files outside sqlite, referenced by path.
 
-- **No producer_classification with built-in time slicing.** A classification
-  is a verdict on the artifact as it exists; if we want to know "what would
-  the classifier have said at time T," that's a re-run with `classifier_version`
-  reflecting the time-T marker conventions, producing new rows.
+- **No per-row time-slicing in `producer_classification`.** Each row is a
+  verdict on the artifact as it exists; there are no `effective_from` /
+  `effective_to` columns. If we want to know "what would the classifier
+  have said at time T," that's a re-run of the classifier with a
+  `classifier_version` reflecting the time-T marker conventions,
+  producing new rows alongside the old. Time-awareness lives in the
+  rules (predicates can inspect `created_at`), not in the schema.
 
 ## Open questions and deferred decisions
 

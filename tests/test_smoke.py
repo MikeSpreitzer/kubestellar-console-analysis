@@ -329,11 +329,23 @@ def test_classifier_rules_cover_known_cases():
         ))
         return v.producer
 
+    from src.classifier.rules import (
+        PRODUCER_CLAUDE_APP, PRODUCER_DEPENDABOT, PRODUCER_NETLIFY,
+        PRODUCER_PROW,
+    )
     # Known logins
     assert _classify(login="kubestellar-hive[bot]") == PRODUCER_HIVE_MERGER
     assert _classify(login="copilot[bot]") == PRODUCER_COPILOT
-    # Generic [bot] login
-    assert _classify(login="dependabot[bot]") == PRODUCER_OTHER_BOT_APP
+    assert _classify(login="copilot-swe-agent[bot]") == PRODUCER_COPILOT
+    assert _classify(login="copilot-pull-request-reviewer[bot]") == PRODUCER_COPILOT
+    assert _classify(login="claude[bot]") == PRODUCER_CLAUDE_APP
+    assert _classify(login="kubestellar-prow[bot]") == PRODUCER_PROW
+    assert _classify(login="netlify[bot]") == PRODUCER_NETLIFY
+    assert _classify(login="dependabot[bot]") == PRODUCER_DEPENDABOT
+    assert _classify(login="kubestellar-console-bot[bot]") == PRODUCER_PROJECT_BOT
+    # Generic [bot] login -- the catch-all
+    assert _classify(login="github-actions[bot]") == PRODUCER_OTHER_BOT_APP
+    assert _classify(login="some-unknown[bot]") == PRODUCER_OTHER_BOT_APP
     # Known emails
     assert _classify(email="scanner@kubestellar.io") == PRODUCER_HIVE_SCANNER
     assert _classify(email="copilot@github.com") == PRODUCER_COPILOT

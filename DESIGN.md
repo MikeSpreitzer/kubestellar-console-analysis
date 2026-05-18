@@ -139,7 +139,8 @@ by them.
 
 ### Layer 2 — classification
 
-Reads layer 1 output and produces `producer_classification` rows. The
+Reads layer 1 output and produces rows in
+[`producer_classification`](SCHEMA.md#producer_classification). The
 classifier is uniform across artifact kinds: issues, PRs, commits,
 comments, and reviews are all presented to the rule list as a common
 ``Record`` shape. ``Record`` carries fields broader than any single
@@ -238,7 +239,8 @@ The analysis layer currently exposes three entry points:
   reveal. Outputs are mostly CSV tables; the time-series follow-ups
   also produce HTML.
 - ``src.analysis.commit_authorship`` -- credential analysis at commit
-  granularity using the git-extractor's ``commit_`` table, plus a
+  granularity using the git-extractor's
+  [``commit_``](SCHEMA.md#commit_) table, plus a
   cross-tab joining commit authorship to PR identity.
 
 For the specific plots and tables each entry point produces today, see
@@ -255,7 +257,9 @@ activity into ``bot-credentialed`` (actor login ends in ``[bot]``),
 NULL). This is a credential classification, not a producer
 classification: human-credentialed work is an upper bound on actual
 human work, since humans may run automation under their own
-credentials. The ``producer_classification`` table from layer 2 is not
+credentials. The
+[``producer_classification``](SCHEMA.md#producer_classification)
+table from layer 2 is not
 used by these outputs; that's deliberate -- the current outputs are a
 "first look" that precedes the classifier.
 
@@ -362,52 +366,63 @@ analysis. Decisions about what to investigate next.
 
 ## What "agentic development" means for this analysis
 
-The repositories under study process work via several producers, only some
-of which are humans. The producer taxonomy used by the classifier:
+The repositories under study process work via several producers, only
+some of which are humans. The classifier's current producer labels
+(see ``src/classifier/rules.py`` for the canonical list and the
+predicates that produce them):
 
-- **Humans (credentialed as themselves)** — author login does not end in
-  `[bot]`, no explicit AI co-author trailer present. This is an upper
-  bound on actual human work; the credential field cannot distinguish
-  human-typed work from human-tool-orchestrated work, and does not
-  account for humans running bots under their own credentials.
+- ``human-credentialed`` — author login does not end in ``[bot]`` and
+  the email is not on the known-bot allowlist. Upper bound on actual
+  human work; the credential field cannot distinguish human-typed work
+  from human-tool-orchestrated work, and does not account for humans
+  running bots under their own credentials.
+- ``copilot`` — GitHub Copilot dispatched as automation (covers
+  ``copilot[bot]``, ``copilot-pull-request-reviewer[bot]``,
+  ``copilot-swe-agent[bot]``, and the ``copilot@github.com`` email).
+  ``sub_producer`` carries the specific identity.
+- ``claude-app`` — the ``claude[bot]`` GitHub App identity (distinct
+  from ``hive-reviewer``, which is identified by the
+  ``reviewer@claude-dev.local`` email rather than a GitHub App).
+- ``prow`` — the ``kubestellar-prow[bot]`` actor (labeler,
+  APPROVALNOTIFIER, label events). Prow is installed but does not
+  actually gate console merges; its presence in the data is mostly
+  bookkeeping artifacts.
+- ``netlify`` — the ``netlify[bot]`` actor (deploy-preview comments).
+- ``dependabot`` — the ``dependabot[bot]`` actor.
+- ``hive-merger`` — the ``kubestellar-hive[bot]`` App (the GitHub-app
+  identity hive uses to merge PRs).
+- ``hive-scanner`` — hive's scanner sub-agent, identified by the
+  ``scanner@kubestellar.io`` email and related kubestellar-org email
+  identities.
+- ``hive-reviewer`` — the Claude-driven reviewer that committed under
+  ``reviewer@claude-dev.local``. (No dedicated GitHub-app login; the
+  email is the only signal.)
+- ``project-bot`` — kubestellar-org bot identities seen in
+  Co-Authored-By trailers or in non-noreply emails (``ks-ci-bot``,
+  ``kubestellar-bot``, ``auto-qa``, ``kubestellar-console-bot``,
+  others).
+- ``other-bot-app`` — any GitHub App login ending in ``[bot]`` that
+  isn't more specifically classified above. Currently dominated by
+  ``github-actions[bot]``, which is the runner identity for *any*
+  GitHub Actions workflow that posts/comments/files things; further
+  splitting requires content-based signals (workflow name, comment
+  body parsing) the classifier does not yet consume.
+- ``unknown`` — the artifact has no actor identity at all.
 
-- **Humans with AI collaboration disclosed** — credential is human, but a
-  `Co-Authored-By:` trailer or similar marker discloses tool use.
+Co-Authored-By trailer detection (the disclosed-AI-collaboration
+signal) is currently a separate code path inside the
+``commit_authorship`` analysis, not part of the classifier rule list.
+It produces a complementary lower-bound signal on AI-assisted commits
+that escaped the credential classification (developer commits under
+their own identity but discloses AI involvement via a trailer).
 
-- **Copilot** — author is `copilot[bot]` (or related), or the `copilot`
-  label is applied. Dispatched by various orchestrators (the
-  `reusable-ai-fix.yml` infra workflow, hive's scanner, manual triggers).
-  The orchestrator and the producer are different concerns.
-
-- **kubestellar-hive[bot]** — author or merger is the hive identity. Hive
-  came online late in the repo's life; presence of this identifier means
-  the artifact is from the hive era. Hive itself is a supervisory layer
-  with multiple sub-agents (scanner, reviewer, architect, outreach,
-  supervisor); the GitHub-visible markers do not always distinguish
-  among them.
-
-- **Auto-QA family** — issues with `[Auto-QA]` title prefix or analogous
-  labels. Multiple sub-checks emit through this convention.
-
-- **Agentic-workflows framework (`[aw]`)** — the `aw` framework supports
-  many distinct workflows; the prefix marks the framework, not a specific
-  producer. Sub-classification requires inspecting which workflow ran.
-
-- **Per-purpose checkers** — link-checker, typo-checker, pr-verifier,
-  etc. Each has its own label or distinctive title. (Distinct from
-  hive's "scanner" sub-agent, which is the supervisory dispatcher inside
-  hive.)
-
-- **Other bots** — dependabot, github-actions, copilot-pull-request-reviewer,
-  dashboard-snapshot bots. Identified by login.
-
-- **Unknown** — bot-credentialed but not classifiable from available
-  markers; or human-credentialed with the upper-bound caveat.
-
-The taxonomy is an evolving artifact. As workflows are added, removed, or
-modified in the subject and support repositories, the classifier rules
-need to track these changes. The `classifier_version` column on
-`producer_classification` lets us re-run when the taxonomy changes.
+The taxonomy is an evolving artifact. As workflows are added,
+removed, or modified in the subject and support repositories, the
+classifier rules need to track these changes. The
+``classifier_version`` column on ``producer_classification`` and the
+``rules_signature()`` integrity check let us re-run when the taxonomy
+changes; old verdicts are preserved alongside new ones for
+comparison.
 
 ## Time resolution
 
@@ -428,9 +443,10 @@ non-stationary evolution. Time resolution choices reflect this.
   annotations on the time axis, not as bins.
 
 - **For "active workflow set at time T"**: a query against
-  `workflow_file_state` returning the latest commit-content prior to T
-  for each path. Any query about behavior at T should resolve via this
-  pattern, not by sampling at coarser intervals.
+  [`workflow_file_state`](SCHEMA.md#workflow_file_state) returning
+  the latest commit-content prior to T for each path. Any query about
+  behavior at T should resolve via this pattern, not by sampling at
+  coarser intervals.
 
 ## Flurry handling
 
@@ -744,3 +760,37 @@ intermediate steps should also be invocable individually for development.
   analysis layer; current-state snapshots, if captured, are useful only
   as a sanity check on those inferences at extraction time. Whether to
   add even that snapshot is deferred.
+- **Walk full PR commit ancestry for the PR-vs-commit-author
+  cross-tab.** ``commit_authorship.pr_vs_commit_authors`` currently
+  joins each PR to a single commit -- the PR's merge commit -- as a
+  coarse proxy for "what produced the PR's changes." For
+  squash-merged PRs (the dominant pattern in console) the merge
+  commit's author is the merger, not the feature-branch authors, so
+  the proxy collapses to a trivial restatement of "who clicked
+  merge." A more thorough version would walk back from
+  ``merge_commit_sha`` through the PR's ancestry, enumerate all
+  feature-branch commits, and report the set of distinct commit
+  authors per PR. Implementation: either subprocess
+  ``git log <base>..<head>`` per PR, or walk ``commit_.parent_shas``
+  in the database. Not currently driven by an analysis question --
+  the simple version showed only 8 cells of interest, all from a
+  brief overlap window during the May 1-3 handoff -- but the proper
+  version is the right thing if we ever want to ask "which PRs
+  contained any human-authored commits."
+- **Comment-body parsing to split ``github-actions[bot]``.** The
+  classifier's largest single producer is ``other-bot-app`` with
+  ``sub_producer=github-actions[bot]`` -- 33,000+ records, all
+  bundled together. ``github-actions[bot]`` is the runner identity
+  for any GitHub Actions workflow that posts/comments/files, so the
+  bundle covers everything from typo-checker comments to Netlify
+  status posts to auto-QA reporters. Splitting it usefully requires
+  a different signal than the actor login alone. Candidates: parsing
+  comment bodies for telltale strings (e.g., ``[Auto-QA]``,
+  ``Netlify``, ``tide``, ``prow``); cross-referencing comments to
+  workflow runs by ``head_sha`` and timing; or matching title
+  prefixes for issues/PRs created by these workflows. The right
+  version is probably workflow-run cross-reference for accuracy
+  combined with body parsing as a cheap fallback. Currently deferred
+  because the unsplit ``github-actions[bot]`` bucket is recognizable
+  enough to set aside in analyses that don't need it, and splitting
+  is a meaningful piece of work.
