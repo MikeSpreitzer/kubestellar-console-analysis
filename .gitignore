@@ -226,3 +226,8 @@ repos/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+
+# editor backups
+*~
+.#*
+\#*#

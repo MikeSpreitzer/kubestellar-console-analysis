@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Mike Spreitzer
+SPDX-License-Identifier: Apache-2.0
+Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
+-->
+
 # Design
 
 This document describes the design of the analysis pipeline beyond what is
@@ -53,11 +59,14 @@ about what has been fetched lives in `extraction_state` rows.
 Two extractors at this layer:
 
 - **GitHub extractor** — issues, PRs, timeline events, reviews, comments,
-  reactions, labels, workflow run metadata, workflow run logs and
-  artifacts (where still in retention). Reads the GitHub REST API.
+  reactions, labels, workflow run metadata. Optionally workflow run logs
+  and artifacts when still in retention; both default off (see "Log
+  fetching deferred" below for why). Reads the GitHub REST API. Requires
+  a GitHub PAT.
 
 - **Git extractor** — commits, commit-file changes, workflow file states.
-  Reads from local git clones of subject and support repositories.
+  Reads from local git clones of subject and support repositories. Does
+  not require a GitHub PAT.
 
 Layer 1 produces only facts that GitHub or git can directly attest to. No
 interpretation, no classification, no derived metrics.
@@ -114,11 +123,90 @@ Layer 3 is the layer most likely to change frequently as we explore which
 metrics tell which stories. The lower layers should be stable; the
 analysis layer should not be.
 
-Output of layer 3:
-- Plots as PNG files
-- Underlying CSVs for each plot, named in parallel, so the numbers behind
-  any chart are inspectable without re-running
-- A run log in markdown summarizing what was produced and any caveats
+Layer 3 opens the database via ``connect_readonly()`` rather than the
+write-time ``connect()`` used by the extractors. This is enforced
+architecturally: an analysis module that tried to ``INSERT`` would
+raise an OperationalError. The SQLite file itself is opened with
+``mode=ro`` in the URI; the surrounding directory must remain
+filesystem-writable so SQLite can access WAL/shm sidecars.
+
+Output of layer 3, per plot:
+- A PNG (matplotlib) for paste-into-doc portability.
+- An HTML file (Plotly) with embedded JS, opening in any browser, for
+  interactive exploration with precise hover values.
+- A CSV with the raw daily counts behind the plot.
+
+The three forms have parallel names under
+``output/plots/<repo>/``, ``output/html/<repo>/``, and
+``output/csv/<repo>/`` respectively, so any single chart's numbers are
+inspectable without re-running the analysis.
+
+The analysis layer currently exposes two entry points:
+- ``src.analysis.first_look`` -- the bot- vs. human-credential
+  daily-binned plots described above.
+- ``src.analysis.drilldown`` -- follow-ups that surface specific
+  rows or per-actor breakdowns informed by what the first-look plots
+  reveal. Outputs are mostly CSV tables; the time-series follow-ups
+  also produce HTML.
+
+For the specific plots and tables each entry point produces today, see
+[Current analysis outputs](#current-analysis-outputs) below.
+
+### Current analysis outputs
+
+The list below enumerates exactly what each entry point produces today.
+It will grow as we add plots; the layer's architecture above does not.
+
+**Classification used in the current outputs.** All current plots split
+activity into ``bot-credentialed`` (actor login ends in ``[bot]``),
+``human-credentialed`` (anything else), and ``unknown`` (the field was
+NULL). This is a credential classification, not a producer
+classification: human-credentialed work is an upper bound on actual
+human work, since humans may run automation under their own
+credentials. The ``producer_classification`` table from layer 2 is not
+used by these outputs; that's deliberate -- the current outputs are a
+"first look" that precedes the classifier.
+
+**``first_look``: six daily-binned stacked-area plots, per subject
+repo.** Each is rendered to PNG, HTML, and CSV.
+
+1. **Issues opened per day, by author credential** -- splits
+   ``issue`` rows (``is_pr=0``) by the credential class of the opener.
+2. **Issues closed per day, by closer credential** -- splits
+   ``issue`` rows (``state='closed'``, non-NULL ``closed_by_id``) by
+   the credential class of the closer.
+3. **PRs opened per day, by author credential** -- splits ``issue``
+   rows (``is_pr=1``) by opener credential.
+4. **PRs merged per day, by merger credential** -- splits
+   ``pull_request`` rows (``merged=1``) by the credential class of
+   ``merged_by_id``.
+5. **Comments on issues per day, by commenter credential** -- comments
+   on issue rows where ``is_pr=0``.
+6. **Comments on PRs per day, by commenter credential** -- comments on
+   issue rows where ``is_pr=1``.
+
+**``drilldown``: follow-up artifacts informed by what first-look
+revealed.** Mostly CSV tables; one stacked-area HTML plot.
+
+1. **Bot-opened-issue producers** -- per-bot-account issue creation,
+   broken down by author login. CSV summary (login, total, first_seen,
+   last_seen) plus an HTML stacked-area of daily counts per login.
+   Surfaces which bot identities (auto-QA, link-checker, etc.) drive
+   the bot-credentialed share of issue creation.
+2. **Post-cutoff human PR authors** -- one row per
+   human-credentialed PR opened on or after a configurable cutoff
+   (default ``2026-05-03``). Plus a per-author summary. Identifies who,
+   if anyone, still authors PRs by hand after the apparent transition
+   to bot-driven authorship.
+3. **PRs around the transition** -- a window of ``window_days`` days
+   on each side of the cutoff, listing each PR's author and merger
+   logins. Lets a reader see the actual identity flip across the
+   inflection.
+
+The cutoff and window are CLI flags (``--cutoff YYYY-MM-DD``,
+``--window-days N``); the default cutoff is informally derived from a
+pixellated reading of the first-look plots and should be refined as
+data accumulates.
 
 ### Layer 4 — interpretation (out of scope for code)
 
@@ -393,8 +481,9 @@ repos:
     local_clone: ../infra
 extraction:
   log_fetch_concurrency: 5             # respect secondary rate limits
-  fetch_logs: true                     # eagerly fetch within 90-day window
-  fetch_artifacts: false               # very large at agentic CI scale; off by default
+  fetch_logs: false                    # see "Log fetching deferred" below
+  fetch_artifacts: false               # see "Log fetching deferred" below;
+                                       # also produced 159 GB on first try
 analysis:
   daily_bin_timezone: UTC
   flurry_gap_minutes: null             # null means compute from data
@@ -420,6 +509,22 @@ preserved here so future re-runs follow the same conventions:
   repos (per observation), so infra's main HEAD at the time of an event
   determines the reusable's behavior at that event. The schema treats
   infra as a parallel time series of state for this reason.
+- **Log fetching deferred.** Two attempts at fetching workflow run logs
+  produced SQLite database corruption mid-run (different b-trees damaged
+  on different runs, but always during the logs-fetch phase). Root cause
+  was not pinned down; the most plausible suspect is a Rancher Desktop
+  virtiofs interaction with concurrent writes during high-frequency
+  UPDATEs on the `workflow_run` table, but this is unproven. Rather than
+  continue debugging the I/O storm, the pipeline currently defaults to
+  `fetch_logs: false`. Run metadata (workflow_path, workflow_name,
+  actor, event, conclusion, head_sha, timestamps) is fully captured and
+  is sufficient for the human/agent characterization the analysis is
+  initially targeting. If the analysis later requires log content,
+  candidate next steps are: lower fetch concurrency to 1; move the
+  SQLite database to a non-virtiofs filesystem (e.g. a Docker named
+  volume on the VM's native ext4) while keeping log files on the bind
+  mount; or fetch logs as a fully separate process that does not touch
+  SQLite at all and reconciles after.
 
 ## Re-running the analysis
 

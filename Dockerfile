@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 FROM python:3.13-slim
 
@@ -12,6 +13,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+# Matplotlib's font-cache directory; default $HOME/.config/matplotlib
+# isn't writable when --user overrides to a UID without an /etc/passwd
+# entry. /tmp is universally writable.
+ENV MPLCONFIGDIR=/tmp/matplotlib
 
 # Install Python dependencies first so changes to source code don't
 # invalidate the dependency layer.

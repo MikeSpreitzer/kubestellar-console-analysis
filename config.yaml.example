@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 # Copy this file to config.yaml and edit. The real config.yaml is gitignored.
 #
@@ -40,8 +41,11 @@ extraction:
   # Concurrent log-fetch ceiling. Keep low to avoid GitHub's secondary
   # rate limits (which include a 100-concurrent cap).
   log_fetch_concurrency: 5
-  # Logs are small per-run and useful for classifying workflow producers.
-  fetch_logs: true
+  # Log fetching is currently disabled by default. Two attempts produced
+  # SQLite database corruption mid-phase on Rancher Desktop's virtiofs;
+  # see DESIGN.md "Log fetching deferred" for the full story and
+  # candidate recovery paths if logs are needed later.
+  fetch_logs: false
   # Artifacts can be very large per-run on agentically-developed CI; a
   # full fetch produced 159 GB on the first try. Default off; flip on
   # only when artifacts are specifically needed.

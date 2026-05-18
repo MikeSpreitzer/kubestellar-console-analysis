@@ -1,7 +1,9 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 requests>=2.31
 PyYAML>=6.0
 pandas>=2.2
 matplotlib>=3.8
+plotly>=5.20

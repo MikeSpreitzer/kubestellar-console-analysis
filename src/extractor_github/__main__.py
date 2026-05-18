@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 """Entry point for the GitHub extractor.
 
@@ -185,7 +186,7 @@ def main(argv: list[str] | None = None) -> int:
         log.error("no subject repos configured (or filter excluded all of them)")
         return 2
 
-    gh = GitHubClient(token=cfg.github_token)
+    gh = GitHubClient(token=cfg.require_github_token())
 
     conn = connect(cfg.db_path)
     init_schema(conn)

@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 """Extract GitHub Actions workflow runs.
 
@@ -93,8 +94,8 @@ def fetch_run_logs_and_artifacts(
     repo_id: int,
     gh_runs_dir: Path,
     *,
-    fetch_logs: bool = True,
-    fetch_artifacts: bool = True,
+    fetch_logs: bool = False,
+    fetch_artifacts: bool = False,
     concurrency: int = 5,
     hourly_checker: Optional[HourlyChecker] = None,
 ) -> int:

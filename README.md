@@ -1,6 +1,7 @@
 <!--
 Copyright 2026 Mike Spreitzer
 SPDX-License-Identifier: Apache-2.0
+Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 -->
 
 # console-analysis
@@ -87,6 +88,54 @@ arguments:
 
     docker run --rm --user "$(id -u):$(id -g)" ... console-analysis \
       -m src.extractor_git --config /config/config.yaml
+
+The git extractor doesn't talk to GitHub, so the `GITHUB_TOKEN`
+environment variable can be omitted for it.
+
+## Running the analysis layer
+
+The analysis modules read from the local sqlite database (via a
+read-only connection) and write to `output/`. They don't talk to
+GitHub or to the git clones, so neither `GITHUB_TOKEN` nor the
+`/repos` bind mount is needed.
+
+`first_look` produces six daily-binned plots of bot- vs.
+human-credentialed activity (issue creation, issue closure, PR
+creation, PR merging, comments on issues, comments on PRs):
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(pwd)/output:/output" \
+      console-analysis \
+      -m src.analysis.first_look --config /config/config.yaml --verbose
+
+`drilldown` produces follow-up artifacts: per-bot-account issue
+producers, post-cutoff human PR authors, and a window of PRs spanning
+an apparent transition date:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(pwd)/output:/output" \
+      console-analysis \
+      -m src.analysis.drilldown --config /config/config.yaml --verbose
+
+The drilldown takes optional `--cutoff YYYY-MM-DD` (default
+2026-05-03) and `--window-days N` (default 5).
+
+Each plot is produced in three forms:
+- `output/plots/<repo>/*.png` -- static, portable, paste-into-doc
+- `output/html/<repo>/*.html` -- interactive (Plotly), hover for
+  exact values; self-contained file, opens in any browser
+- `output/csv/<repo>/*.csv` -- the raw daily counts behind each plot
+
+The `data` mount is writable because SQLite may need to access
+WAL/shm sidecar files even when the database itself is opened
+read-only; the analysis code uses a read-only connection internally
+and will not modify the database.
 
 ## Recovering from a halted run
 

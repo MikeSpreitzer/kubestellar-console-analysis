@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 """Configuration loading for the console-analysis pipeline.
 
@@ -34,8 +35,8 @@ class RepoConfig:
 @dataclass
 class ExtractionConfig:
     log_fetch_concurrency: int = 5
-    fetch_logs: bool = True
-    fetch_artifacts: bool = True
+    fetch_logs: bool = False
+    fetch_artifacts: bool = False
 
 
 @dataclass
@@ -46,7 +47,10 @@ class AnalysisConfig:
 
 @dataclass
 class Config:
-    github_token: str
+    # github_token is None when the environment variable is unset. The
+    # extractors must call require_github_token() to fail loudly; the
+    # analysis layer does not need it and leaves it None.
+    github_token: Optional[str]
     data_dir: Path
     output_dir: Path
     repos: list[RepoConfig] = field(default_factory=list)
@@ -66,6 +70,20 @@ class Config:
             if r.slug == slug:
                 return r
         return None
+
+    def require_github_token(self) -> str:
+        """Return the token, raising if unset.
+
+        Called by entry points that actually need to make GitHub API
+        calls (the extractors). The analysis layer does not call this.
+        """
+        if not self.github_token:
+            raise RuntimeError(
+                "GitHub PAT is required for this operation but the "
+                "configured environment variable is unset; export your "
+                "PAT before running"
+            )
+        return self.github_token
 
 
 def load_config(path: Path | str = "config.yaml") -> Config:
@@ -91,12 +109,7 @@ def load_config(path: Path | str = "config.yaml") -> Config:
     raw = yaml.safe_load(path.read_text())
 
     token_env = raw.get("github_token_env", "GITHUB_TOKEN")
-    token = os.environ.get(token_env)
-    if not token:
-        raise RuntimeError(
-            f"environment variable {token_env} is unset; "
-            f"export your GitHub PAT before running"
-        )
+    token = os.environ.get(token_env) or None
 
     data_dir = Path(raw.get("data_dir", "./data")).resolve()
     output_dir = Path(raw.get("output_dir", "./output")).resolve()
@@ -116,8 +129,8 @@ def load_config(path: Path | str = "config.yaml") -> Config:
     ex = raw.get("extraction", {})
     extraction = ExtractionConfig(
         log_fetch_concurrency=ex.get("log_fetch_concurrency", 5),
-        fetch_logs=ex.get("fetch_logs", True),
-        fetch_artifacts=ex.get("fetch_artifacts", True),
+        fetch_logs=ex.get("fetch_logs", False),
+        fetch_artifacts=ex.get("fetch_artifacts", False),
     )
 
     an = raw.get("analysis", {})

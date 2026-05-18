@@ -1,3 +1,9 @@
+<!--
+Copyright 2026 Mike Spreitzer
+SPDX-License-Identifier: Apache-2.0
+Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
+-->
+
 # Schema design
 
 This document describes the data model for the analysis. Code reads and writes

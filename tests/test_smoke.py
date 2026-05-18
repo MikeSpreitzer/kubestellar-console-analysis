@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 """Smoke tests: imports succeed and the schema applies cleanly to an
 in-memory sqlite database."""
@@ -22,6 +23,7 @@ def test_imports():
         comments, issues, labels, pr_files, reactions, reviews, runs, timelines,
     )
     from src.extractor_git import git_cli, walker  # noqa: F401
+    from src.analysis import first_look, drilldown  # noqa: F401
 
 
 def test_schema_applies():
@@ -199,6 +201,74 @@ def test_hourly_checker_zero_interval_always_checks():
         conn.close()
 
 
+def test_connect_readonly_refuses_writes():
+    """connect_readonly should open without error and reject writes."""
+    import tempfile
+    from src.common.db import connect, connect_readonly, init_schema
+
+    with tempfile.TemporaryDirectory() as td:
+        db_path = Path(td) / "db.sqlite"
+        # Create database with the writable connect, then close.
+        wconn = connect(db_path)
+        init_schema(wconn)
+        wconn.execute(
+            "INSERT INTO repo (owner, name, role, first_seen_at) "
+            "VALUES (?, ?, ?, ?)",
+            ("kubestellar", "console", "subject", "2026-01-15T12:00:00Z"),
+        )
+        wconn.close()
+
+        # Open read-only and verify reads work.
+        rconn = connect_readonly(db_path)
+        rows = rconn.execute("SELECT owner, name FROM repo").fetchall()
+        assert len(rows) == 1
+        assert rows[0]["owner"] == "kubestellar"
+
+        # Verify a write attempt raises.
+        try:
+            rconn.execute(
+                "INSERT INTO repo (owner, name, role, first_seen_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("foo", "bar", "subject", "2026-01-15T12:00:00Z"),
+            )
+            rconn.commit()
+            rconn.close()
+            raise AssertionError("expected read-only connection to reject INSERT")
+        except sqlite3.OperationalError:
+            pass
+        rconn.close()
+
+
+def test_first_look_classifies_login():
+    from src.analysis.first_look import (
+        _classify_login, CREDENTIAL_BOT, CREDENTIAL_HUMAN, CREDENTIAL_UNKNOWN,
+    )
+    assert _classify_login("dependabot[bot]") == CREDENTIAL_BOT
+    assert _classify_login("kubestellar-hive[bot]") == CREDENTIAL_BOT
+    assert _classify_login("clubanderson") == CREDENTIAL_HUMAN
+    assert _classify_login("MikeSpreitzer") == CREDENTIAL_HUMAN
+    assert _classify_login(None) == CREDENTIAL_UNKNOWN
+
+
+def test_first_look_daily_counts():
+    """Verify daily binning groups by UTC day and pivots correctly."""
+    import pandas as pd
+    from src.analysis.first_look import _daily_counts
+
+    df = pd.DataFrame([
+        {"created_at": "2026-01-01T05:00:00Z", "credential": "human-credentialed"},
+        {"created_at": "2026-01-01T18:00:00Z", "credential": "human-credentialed"},
+        {"created_at": "2026-01-01T20:00:00Z", "credential": "bot-credentialed"},
+        {"created_at": "2026-01-02T03:00:00Z", "credential": "human-credentialed"},
+    ])
+    daily = _daily_counts(df, "created_at", "credential")
+    assert len(daily) == 2
+    # Day 2026-01-01 should have 2 human + 1 bot.
+    day1 = daily.iloc[0]
+    assert day1["human-credentialed"] == 2
+    assert day1["bot-credentialed"] == 1
+
+
 def test_iso8601_timestamps_roundtrip(tmp_path=None):
     """Regression: ISO 8601 timestamps with 'T' and 'Z' must round-trip
     through the database without sqlite3 attempting to parse them as
@@ -284,5 +354,8 @@ if __name__ == "__main__":
     test_vacuum_into_creates_clean_copy()
     test_hourly_checker_first_call_does_not_check()
     test_hourly_checker_zero_interval_always_checks()
+    test_connect_readonly_refuses_writes()
+    test_first_look_classifies_login()
+    test_first_look_daily_counts()
     test_iso8601_timestamps_roundtrip()
     print("smoke tests passed")

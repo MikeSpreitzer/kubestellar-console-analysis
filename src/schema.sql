@@ -1,5 +1,6 @@
 -- Copyright 2026 Mike Spreitzer
 -- SPDX-License-Identifier: Apache-2.0
+-- Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 -- Schema for console-analysis sqlite store.
 -- See SCHEMA.md for the human-readable specification of why each table is

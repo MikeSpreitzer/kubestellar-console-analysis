@@ -1,5 +1,6 @@
 # Copyright 2026 Mike Spreitzer
 # SPDX-License-Identifier: Apache-2.0
+# Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
 """SQLite connection helpers and schema initialization."""
 
@@ -15,9 +16,11 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.sql"
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Open a sqlite connection with our standard pragmas applied.
+    """Open a sqlite connection for read-write use with our standard
+    pragmas applied. Caller is responsible for closing.
 
-    Caller is responsible for closing.
+    For read-only use (e.g. the analysis layer), call
+    :func:`connect_readonly` instead.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     # Note: deliberately not using detect_types=PARSE_DECLTYPES.
@@ -38,6 +41,26 @@ def connect(db_path: Path) -> sqlite3.Connection:
     # process exit. For our extraction throughput the cost is
     # negligible compared to the cost of a corrupt database.
     conn.execute("PRAGMA synchronous = FULL")
+    return conn
+
+
+def connect_readonly(db_path: Path) -> sqlite3.Connection:
+    """Open a sqlite connection in read-only mode.
+
+    Suitable for analysis-layer code that should never modify the
+    database. Skips the write-time pragmas (journal_mode, synchronous)
+    that would fail on a read-only handle. Also tolerates the database
+    file being on a read-only filesystem.
+    """
+    if not db_path.exists():
+        raise FileNotFoundError(f"database not found at {db_path}")
+    # SQLite URI form with mode=ro. Note: SQLite still needs to read
+    # any WAL/shm sidecars to see the latest data, so the *directory*
+    # containing the database should not be strictly read-only at the
+    # filesystem level even when the database itself is opened ro.
+    uri = f"file:{db_path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+    conn.row_factory = sqlite3.Row
     return conn
 
 
