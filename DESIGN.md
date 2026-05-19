@@ -581,33 +581,167 @@ Procedural rather than evaluative on their own.
 - Fraction of PRs with any human-credentialed comment before merge
 - Reviews per PR (formal)
 
-### Quality metrics (legitimate, with caveats)
+### Resolution-quality signals (triangulation, not measurement)
 
-These attempt to measure resolution quality, not just procedural
-engagement. All have known limitations that should be reported
-alongside the numbers.
+The underlying question -- "did the resolution actually resolve the
+problem the reporter faced" -- is **fundamentally not measurable**
+from GitHub data alone. Reporter satisfaction lives in someone's
+head, not in the data; we can only enumerate observable proxies and
+let them triangulate. Convergence across multiple proxies is
+informative; divergence is ambiguous. Reporting any single number
+from any single proxy is misleading.
 
-- **Reopen rate per cohort.** A direct lower bound on premature
-  closes: the fraction of closed issues that someone reopens. Cohort
-  by month or by closer credential. Caveat: silent drops by reporters
-  who never come back are invisible by construction.
-- **Same-reporter follow-up filing rate.** The original reporter
-  filed a new related issue within N days of close. A second lower
-  bound on "the close didn't address the reporter's concern." Caveat:
-  same as above; reporters who don't follow up are invisible.
-- **"Still broken" / "doesn't fix" comment presence on closed
-  issues.** Phrase-matching on post-close comments by the original
-  reporter. Caveat: noisy, both false positive and false negative.
-  Higher signal when narrowed to comments by the original reporter.
-- **Reactions on closed issues and closing PRs.** A 👎 reaction on
-  a closing comment, or 👍 on a "still broken" follow-up comment,
-  is explicit dissatisfaction. Sparse but high-signal where present.
+#### Shared limitations affecting all signals
+
+Before the per-signal entries, four limitations apply to every signal
+in this section:
+
+1. **Silent drops.** A reporter who hits a problem, sees the issue
+   closed in a way that didn't help them, and just moves on (uses a
+   different tool, files no follow-up) produces no signal at all.
+   This is the recall ceiling on every metric here; we have no idea
+   how far below the observable signal the actual phenomenon sits.
+
+2. **Adoption lag is bidirectional.** It degrades both precision and
+   recall of time-windowed signals.
+   - *Recall-degrading direction*: a reporter on an old version files
+     a follow-up after the fix was merged but before they upgraded.
+     If the metric requires the follow-up to be near the closing PR
+     in time, it misses these.
+   - *Precision-degrading direction*: a reporter files a fresh
+     complaint about behavior that was just fixed in the latest
+     release, but they're running an older release. The metric flags
+     it as resolution-quality dissatisfaction; it's actually adoption
+     lag noise.
+
+   A partial mitigation specific to this project is described under
+   "Version-aware filtering" below.
+
+3. **Attention non-uniformity.** Reporters and observers are not
+   full-time on the project; they have other work, take vacations,
+   may not visit GitHub for weeks. Time-windowed metrics that pick
+   a single N-days window miss real follow-ups that happened later
+   and admit unrelated activity that fell within the window.
+   Reporting results across multiple window widths is the realistic
+   defense.
+
+4. **Multi-case bundling.** A "follow-up" can be many different
+   things: restating the same complaint, flagging that the
+   resolution introduced a new problem, flagging that the resolution
+   addressed only part of the problem, citing the closing PR with
+   "this only handles A, not B," etc. Several proxies blur these
+   together; entries below say which one each catches.
+
+Each per-signal entry below names that signal's individual
+precision/recall character on top of these shared limitations.
+
+#### Per-signal entries
+
+These are split into two precision/recall regimes. **High-precision
+signals** rarely fire when nothing's wrong, but most cases of
+dissatisfaction don't trigger them. **Low-precision, higher-recall
+signals** flag many things, only some of which are real
+dissatisfaction; they're useful as triggers for human review or as
+volume measurements, not as definitive counts.
+
+**High-precision, low-recall (when they fire, they almost always
+indicate dissatisfaction):**
+
+- **Reopen by original reporter.** When the original reporter
+  reopens, that's nearly definitive evidence the close was
+  premature. Sub-segment: reopened by original reporter vs.
+  reopened by someone else vs. reopened by maintainer (each carries
+  different signal).
+- **👎 reaction on a closing comment** (or 👍 on a "still broken"
+  follow-up). Explicit dissatisfaction. Sparse where present.
+- **Same-reporter follow-up that explicitly cites the closing PR.**
+  Phrases like "after #N", "fix from #N didn't work", "this regressed
+  in #N", or GitHub cross-reference timeline events linking back to
+  the closing PR. Catches both "resolution introduced a new problem"
+  and "resolution addressed only part of the problem" cases.
+- **Maintainer-marked duplicate** (`state_reason='duplicate'`). High
+  precision because a triager actively decided two issues were the
+  same problem. Recall depends on triager diligence.
+
+**Low-precision, higher-recall (these flag many things that aren't
+necessarily dissatisfaction):**
+
+- **Same-reporter re-filing rate** (any new issue by reporter R
+  within window W of one of R's earlier closes, in the same repo).
+  Some of those re-filings are about the resolution; many are
+  unrelated. Useful as a volume signal across producer classes
+  rather than as a count of dissatisfaction.
+- **Cross-reporter same-area volume.** New issues in the same label
+  or feature area as a recently-closed one, by people other than the
+  original reporter. Catches the "person B hits the same broken
+  behavior person A reported" case but with substantial false
+  positives from genuinely-different bugs in the same area.
+- **Title/body text similarity** between a new issue and a recently
+  closed one, above a threshold. Higher recall than explicit citation
+  but much noisier; threshold is a judgment call.
+- **"Still broken" / "doesn't fix" / "didn't work" / "what about Y"
+  phrase matching** on post-close comments. Recall depends on whether
+  the commenter uses the matched phrasing; precision depends on
+  whether the comment is actually about *this* close. Higher precision
+  when narrowed to comments by the original reporter (graduating
+  toward the high-precision tier).
+- **Cross-reference patterns**: how many issues cite a given closing
+  PR in the days/weeks after merge, by people other than the merger.
+  The presence of post-merge citations is a signal that the close is
+  being talked about; whether the talk is "this fix is good" or "this
+  fix broke things" is ambiguous from the count alone.
+
+#### Version-aware filtering (partial adoption-lag mitigation)
+
+The kubestellar issue-reporting templates ask reporters for the
+version they're using, often as specifically as a git commit sha.
+That signal -- when present -- is enough to convert the
+adoption-lag confound from an unknown bias into a filter.
+
+The mitigation, when implemented, would:
+
+1. Parse the reporter's version from the issue body.
+2. Map the version (release tag, branch name, or sha) to the set
+   of commit shas it includes.
+3. For each follow-up signal, check whether the reporter's reported
+   version actually contained the closing PR's commit.
+   - If it did: the complaint is **strong evidence** of resolution
+     dissatisfaction; promote it in the precision tier.
+   - If it didn't: the complaint is **adoption-lag noise**, not
+     evidence about the fix; exclude from quality signals.
+   - If the reporter didn't supply a version: the signal stays in
+     its baseline tier.
+
+This is feasible in this project specifically because of the
+template discipline; in projects without that discipline the
+mitigation is much harder. We don't currently extract this signal;
+implementing it is a real piece of work (parsing the body, mapping
+versions to shas via tag/release walks) but tractable. Adding to
+"Open design questions" below if not already there.
+
+#### Reading the signals together
+
+The recommendation: report multiple signals from both regimes
+together, rather than picking one. **Convergence** -- multiple
+high-precision signals firing on the same artifact, plus a
+low-precision signal -- is strong evidence. **Divergence** --
+high-precision signals quiet but low-precision signals elevated --
+is ambiguous: it could be a noisy area, or it could be widespread
+dissatisfaction that's not surfacing in the high-precision channels.
+The asymmetry is the honest framing: a high reading in any signal
+is evidence the underlying phenomenon exists; a low reading in
+every signal is *not* evidence the phenomenon is absent (silent
+drops and adoption lag together can keep all signals quiet).
+
+#### A separate signal not in the precision/recall framing
+
 - **Commit-message keyword scan.** Counts of commits whose messages
   contain "revert", "fix", "rollback", "broken", etc., aggregated
   by author/producer. A cheap proxy for "this commit was undoing or
-  correcting prior work." Less an absolute quality metric and more
-  a signal whose level can be compared across producer classes and
-  across the agentic handoff.
+  correcting prior work." Doesn't fit the issue-resolution-quality
+  framing above; it's a separate signal about the commit stream
+  itself. Useful as a level to compare across producer classes and
+  across the agentic-handoff boundary.
 
 ### Self-quality of the analysis (not subject-quality)
 
@@ -890,3 +1024,21 @@ intermediate steps should also be invocable individually for development.
   because the unsplit ``github-actions[bot]`` bucket is recognizable
   enough to set aside in analyses that don't need it, and splitting
   is a meaningful piece of work.
+- **Version-aware filtering of resolution-quality signals.** The
+  shared limitations on dissatisfaction signals include adoption
+  lag, which biases time-windowed signals in both directions. A
+  partial mitigation specific to this project: the issue-reporting
+  templates ask for the version the reporter is using, often as a
+  release tag or git commit sha. Extracting that signal converts
+  adoption lag from an unknown bias into a filter -- complaints
+  from reporters who were on a version *not* containing the closing
+  PR's commit are adoption-lag noise and should be excluded from
+  quality signals; complaints from reporters who *were* on a
+  version including the fix become much stronger evidence of
+  resolution dissatisfaction. Implementation requires (a) parsing
+  the version field from the issue body, (b) building a
+  version-to-commit-shas map by walking the relevant repos' tags
+  and release history. Tractable in this project because of the
+  template discipline. Not yet implemented; described in detail in
+  the "Resolution-quality signals" section under "Version-aware
+  filtering."
