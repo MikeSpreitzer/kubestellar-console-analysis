@@ -586,43 +586,61 @@ These limitations should be kept visible whenever results are presented.
 
 ## Storage layout
 
+The analysis-repo working tree lives alongside the cloned analysis-target
+repos as **siblings** under a common parent directory. The analysis repo
+does not contain the cloned target repos; the docker invocation
+bind-mounts the sibling clones into the container at `/repos`.
+
+Host layout:
+
 ```
-console-analysis/
-├── SCHEMA.md
-├── DESIGN.md
-├── README.md
-├── LICENSE
-├── .gitignore                         # excludes data/
-├── data/                              # gitignored
-│   ├── db.sqlite                      # the sqlite database
-│   ├── snapshots/                     # pre-phase VACUUM INTO snapshots
-│   └── gh_runs/                       # gzipped logs and artifacts
-│       └── <repo_id>/
-│           └── <run_id>/
-│               ├── logs.tar.gz
-│               └── artifacts/...
-├── repos/                             # gitignored, optional
-│   ├── kubestellar-console/           # subject
-│   ├── kubestellar-docs/              # subject (when added)
-│   ├── kubestellar-hive/              # support (supervisory layer)
-│   └── kubestellar-infra/             # support (reusable workflows)
-├── src/
-│   ├── schema.sql                     # DDL matching SCHEMA.md
-│   ├── extractor_github/              # layer 1, GitHub side
-│   ├── extractor_git/                 # layer 1, git side
-│   ├── classifier/                    # layer 2
-│   ├── analysis/                      # layer 3
-│   └── common/                        # shared utilities
-├── output/                            # gitignored; analysis layer's outputs
-│   ├── plots/
-│   ├── csv/
-│   └── reports/
-└── tests/
+<parent>/
++-- console-analysis/                  # this repo
+|   +-- SCHEMA.md
+|   +-- DESIGN.md
+|   +-- README.md
+|   +-- TASKS.md
+|   +-- LICENSE
+|   +-- .gitignore                     # excludes data/, output/, config.yaml
+|   +-- Dockerfile
+|   +-- requirements.txt
+|   +-- config.yaml.example
+|   +-- config.yaml                    # gitignored
+|   +-- data/                          # gitignored
+|   |   +-- db.sqlite                  # the sqlite database
+|   |   +-- snapshots/                 # pre-phase VACUUM INTO snapshots
+|   |   \-- gh_runs/                   # gzipped logs and artifacts (per-run)
+|   |       \-- <repo_id>/<run_id>/
+|   |           +-- logs.tar.gz
+|   |           \-- artifacts/...
+|   +-- output/                        # gitignored; analysis layer's outputs
+|   |   +-- plots/<repo>/              # PNGs (matplotlib)
+|   |   +-- html/<repo>/               # HTMLs (Plotly, embedded JS)
+|   |   \-- csv/<repo>/                # raw daily counts behind each plot
+|   +-- src/
+|   |   +-- schema.sql                 # DDL matching SCHEMA.md
+|   |   +-- extractor_github/          # layer 1, GitHub side
+|   |   +-- extractor_git/             # layer 1, git side
+|   |   +-- classifier/                # layer 2
+|   |   +-- analysis/                  # layer 3
+|   |   \-- common/                    # shared utilities
+|   \-- tests/
++-- console/                           # subject repo (cloned by user)
++-- docs/                              # subject (when added)
++-- hive/                              # support (supervisory layer)
+\-- infra/                             # support (reusable workflows)
 ```
 
-The data and output directories are gitignored. The repos directory is
-also gitignored — the analysis works from local git clones the user
-maintains; the analysis repo does not vendor the subject repos.
+The `data/` and `output/` directories are gitignored. The cloned
+sibling repos are not part of this repo; the user maintains them
+separately. None of the analysis code writes to those clones.
+
+Container view: when the docker invocation mounts `$(cd .. && pwd)`
+as `/repos:ro`, the container sees the sibling clones at
+`/repos/console`, `/repos/hive`, `/repos/infra`, etc. The
+`config.yaml` in the container references those container-side paths
+in its `local_clone:` fields. (See `config.yaml.example` for the
+fully-resolved paths the example uses.)
 
 ## Configuration
 
