@@ -503,52 +503,130 @@ Approaches, in order of expected usefulness:
 Reversal is a candidate metric; whether it ends up in the published
 analysis depends on what the cheap proxies actually show.
 
-## Quality metric inventory
+## Metric inventory
 
-These are the metrics anticipated for the analysis layer. Not all will be
-implemented in the first cut; the list is meant to be aspirational and
-evolving.
+These are the metrics anticipated for the analysis layer. The
+categorization below is deliberate: speed metrics, behavior metrics,
+and quality metrics measure different things and shouldn't be conflated.
+Not all will be implemented in the first cut; the list is meant to be
+aspirational and evolving.
 
-### Authorship and orchestration mix
+### Authorship and orchestration mix (descriptive)
+
+These are the foundational descriptive plots -- they show *who* does
+*what*, without claiming any of it is good or bad.
 
 - PR authorship by producer, daily, time series
 - PR merger by producer, daily, time series
 - Issue authorship by producer, daily, time series
 - Issue → PR producer mapping (who-wrote-issue × who-wrote-PR), weekly
 
-### Throughput and cadence
+### Speed and cadence (not quality)
 
-- PRs merged per day, segmented by producer
-- Issues opened per day, segmented by producer
+These measure how fast the system clears work, not whether the work
+is good. A high-throughput system can be shipping bad work quickly.
+
+- PRs merged per day, segmented by producer (already in first_look)
+- Issues opened per day, segmented by producer (already in first_look)
 - Time from issue open to first PR linked to it
 - Time from PR open to merge, distribution
 - Issues closed within N minutes of opening (right-tail of fast closes)
+- **Mean Time To Resolution** of issues, broken out by closer
+  credential and by issue kind. Several methodologies should be
+  reported side by side because they diverge in the presence of
+  reopens:
 
-### Engagement signals
+  * *first-close interval*: open → first close. Smallest of the three.
+    Treats the issue as resolved at the first close even if it was
+    later reopened. Most "MTTR" tools use this by default.
+  * *cumulative-open time*: sum of all (open → close) intervals
+    across the issue's life. Excludes the closed-and-then-reopened
+    gaps where nobody was working on it. Best matches "how long was
+    this an active concern."
+  * *final-close interval*: open → final close. Wall-clock from initial
+    report until things stabilized, including any
+    abandoned-then-resumed periods. Largest of the three.
+
+  Recommended primary metric: cumulative-open time. Also report
+  final-close interval and the count of reopened issues; the gap
+  between cumulative and final is itself informative.
+
+### Behavior and churn (descriptive, not evaluative)
+
+These measure what the codebase looks like over time. They are
+*descriptive* -- they tell us about the shape of churn, not whether
+it indicates good or bad work. A line removed by a later PR could
+be a quality fix, a refactor, completion of work that was a sketch
+in the earlier PR, or a response to a changed requirement; the
+metric does not distinguish among these. Treat producer cross-tabs
+as descriptive break-outs, not quality verdicts.
+
+- Same-file touch-return rate, family of curves over multiple windows
+- Line survival curves per cohort, segmented by producer of the
+  addition AND producer of the removal (four cells:
+  bot/bot, bot/human, human/bot, human/human). The four-cell view
+  is descriptive; specifically, it cannot be read as "agentic system
+  fixing its own work" without an external signal of intent (see
+  below on commit-message keyword scans).
+- Per-file commit frequency over time
+- Comparison of survival distributions across the agentic-handoff
+  boundary -- whether the shape changed when hive came online
+
+### Engagement signals (procedural, quality-adjacent)
+
+Useful for the "is anyone reading what's being shipped" question.
+Procedural rather than evaluative on their own.
 
 - Comments per PR before merge, distribution
 - Fraction of PRs with any human-credentialed comment before merge
 - Reviews per PR (formal)
-- Up-vote / thumbs-down reaction counts on issues and PRs
 
-### Reversal and churn
+### Quality metrics (legitimate, with caveats)
 
-- Same-file touch-return rate, family of curves over multiple windows
-- Line survival curves per cohort
-- Per-file commit frequency over time
+These attempt to measure resolution quality, not just procedural
+engagement. All have known limitations that should be reported
+alongside the numbers.
 
-### Workflow scaffolding
+- **Reopen rate per cohort.** A direct lower bound on premature
+  closes: the fraction of closed issues that someone reopens. Cohort
+  by month or by closer credential. Caveat: silent drops by reporters
+  who never come back are invisible by construction.
+- **Same-reporter follow-up filing rate.** The original reporter
+  filed a new related issue within N days of close. A second lower
+  bound on "the close didn't address the reporter's concern." Caveat:
+  same as above; reporters who don't follow up are invisible.
+- **"Still broken" / "doesn't fix" comment presence on closed
+  issues.** Phrase-matching on post-close comments by the original
+  reporter. Caveat: noisy, both false positive and false negative.
+  Higher signal when narrowed to comments by the original reporter.
+- **Reactions on closed issues and closing PRs.** A 👎 reaction on
+  a closing comment, or 👍 on a "still broken" follow-up comment,
+  is explicit dissatisfaction. Sparse but high-signal where present.
+- **Commit-message keyword scan.** Counts of commits whose messages
+  contain "revert", "fix", "rollback", "broken", etc., aggregated
+  by author/producer. A cheap proxy for "this commit was undoing or
+  correcting prior work." Less an absolute quality metric and more
+  a signal whose level can be compared across producer classes and
+  across the agentic handoff.
+
+### Self-quality of the analysis (not subject-quality)
+
+Not a quality metric of the analyzed code, but worth tracking
+alongside the others:
+
+- **Cross-version classifier verdict comparison.** When the rule list
+  improves, comparing producer classifications across versions shows
+  where the analysis was previously fooled. The diff between v1 and
+  v2 is itself a measurement of how much the older view was wrong.
+
+### Workflow scaffolding (descriptive)
+
+Tracks the rate at which the agentic system's own infrastructure
+changes. Descriptive, not quality.
 
 - Number of distinct workflow files active per day
 - Workflow file change rate (uncollapsed and flurry-collapsed)
 - Disabled/re-enabled status of each workflow over time
-
-### Issue lifecycle
-
-- Reopen rate per cohort
-- Time to reopen distribution
-- Same-reporter follow-up filing rate
-- "Still broken" comment presence on closed issues
 
 ### Subject-area splits
 
@@ -556,8 +634,8 @@ For each metric above where it's meaningful: split by
 
 - Issue/PR kind (bug, feature, doc, etc.)
 - Tier classification (tier/0..3, where the label is present)
-- Whether the change touches `.github/workflows/` (i.e., is the agentic
-  scaffolding being modified)
+- Whether the change touches `.github/workflows/` (i.e., is the
+  agentic scaffolding being modified)
 
 ## What this analysis cannot measure
 
