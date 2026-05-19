@@ -511,15 +511,70 @@ and quality metrics measure different things and shouldn't be conflated.
 Not all will be implemented in the first cut; the list is meant to be
 aspirational and evolving.
 
+### Era awareness (applies to every metric)
+
+The ``kubestellar/console`` repo has gone through six ACMM layers in
+its lifetime, each with distinct characteristics. The v2 ACMM paper
+identifies differences across at least:
+
+- The agent-instruction layer: none in L1, evolving through L2's
+  introduction of CLAUDE.md and copilot-instructions, to L6's
+  per-agent CLAUDE.md files (e.g. hive's 902-line scanner instructions).
+- The tool stack: prompt-and-review in L1, testing infrastructure
+  in L3, triage loops and auto-QA in L4, full agent fleets in L6.
+- Feedback-loop sophistication: open in L1-L3, closed-loop with
+  the system measuring and reacting to itself starting in L4.
+- The human role: producer (L1-L3), reviewer (L4-L5), strategist
+  setting direction with humans gating queue config rather than
+  individual artifacts (L6).
+- Throughput: each layer higher than the last; L6 dramatically so.
+- Attribution discipline: less structured agent attribution in
+  earlier layers, with conventions for marking AI-assisted work
+  evolving over time.
+
+The whole lifetime of `kubestellar/console` has been an experiment
+in coding-agent use; no era was non-agentic. What changes across
+eras is the structure, discipline, and observability of the
+agentic activity.
+
+The attribution-discipline difference is the one our measurement
+framework most directly contends with: earlier layers had less
+structured attribution, so author-credential classification is less
+reliable as a measure of human-vs-agent split during those eras.
+The visible "human-credentialed" share in the early period may
+overstate human activity because agent activity was less detectable.
+Other differences (the agent-instruction layer evolving, the
+feedback loops appearing, the role shifts) are not directly
+captured by our author-credential metrics; they require different
+measurement strategies (looking at the workflow and policy file
+trees over time, looking at workflow run patterns, or going outside
+Git/GitHub data entirely).
+
+Whether the analyses here correctly characterize any specific era
+is something only a reader with ground truth about that era can
+evaluate. The numbers and curves are the analysis's view of what's
+visible; whether that view matches the era's reality is a separate
+question, and the analysis itself cannot answer it.
+
+When plotting metrics across the repo's lifetime, mark era boundaries
+as point annotations on the time axis where feasible -- the
+continuous appearance of the curve obscures categorical
+differences across eras.
+
 ### Authorship and orchestration mix (descriptive)
 
 These are the foundational descriptive plots -- they show *who* does
 *what*, without claiming any of it is good or bad.
 
 - PR authorship by producer, daily, time series
+  (already in first_look, currently as bot-vs-human credential class
+  rather than full producer taxonomy)
 - PR merger by producer, daily, time series
+  (already in first_look, same caveat)
 - Issue authorship by producer, daily, time series
+  (already in first_look, same caveat)
 - Issue → PR producer mapping (who-wrote-issue × who-wrote-PR), weekly
+  (not yet implemented)
 
 ### Speed and cadence (not quality)
 
@@ -599,8 +654,15 @@ in this section:
 1. **Silent drops.** A reporter who hits a problem, sees the issue
    closed in a way that didn't help them, and just moves on (uses a
    different tool, files no follow-up) produces no signal at all.
-   This is the recall ceiling on every metric here; we have no idea
-   how far below the observable signal the actual phenomenon sits.
+   Each metric in this section is a count of *signal triggers*.
+   Each trigger is evidence that dissatisfaction exists somewhere.
+   Many cases of dissatisfaction trigger no signal -- silent drops,
+   adoption lag, attention gaps -- so the count is a lower bound on
+   the number of dissatisfaction cases, with unbounded slack between
+   the count and the truth. The framing is asymmetric: a high count
+   in any signal is real evidence that the underlying phenomenon
+   exists; a low count in every signal is *not* evidence that the
+   phenomenon is absent.
 
 2. **Adoption lag is bidirectional.** It degrades both precision and
    recall of time-windowed signals.
@@ -619,11 +681,12 @@ in this section:
 
 3. **Attention non-uniformity.** Reporters and observers are not
    full-time on the project; they have other work, take vacations,
-   may not visit GitHub for weeks. Time-windowed metrics that pick
-   a single N-days window miss real follow-ups that happened later
-   and admit unrelated activity that fell within the window.
-   Reporting results across multiple window widths is the realistic
-   defense.
+   may not visit GitHub for days or even weeks at a time. The
+   relevant gap can be as short as a long weekend. Time-windowed
+   metrics that pick a single N-days window miss real follow-ups
+   that happened later and admit unrelated activity that fell
+   within the window. Reporting results across multiple window
+   widths is the realistic defense.
 
 4. **Multi-case bundling.** A "follow-up" can be many different
    things: restating the same complaint, flagging that the
@@ -691,14 +754,22 @@ necessarily dissatisfaction):**
   being talked about; whether the talk is "this fix is good" or "this
   fix broke things" is ambiguous from the count alone.
 
-#### Version-aware filtering (partial adoption-lag mitigation)
+#### Version-aware filtering (partial adoption-lag mitigation, console-specific)
 
-The kubestellar issue-reporting templates ask reporters for the
-version they're using, often as specifically as a git commit sha.
-That signal -- when present -- is enough to convert the
+The `kubestellar/console` issue-reporting template asks reporters
+for the version they're using, often as specifically as a git
+commit sha. That signal -- when present -- is enough to convert the
 adoption-lag confound from an unknown bias into a filter.
 
-The mitigation, when implemented, would:
+This is a feature of `kubestellar/console`'s template
+specifically, not a uniform feature of the kubestellar
+organization. Other repos in the org may not request a version,
+or may request it in a different form. Extending this mitigation
+to docs (or any other future subject) requires a per-repo check of
+the issue template; we don't get it for free across the
+organization.
+
+The mitigation, when implemented for console, would:
 
 1. Parse the reporter's version from the issue body.
 2. Map the version (release tag, branch name, or sha) to the set
@@ -712,12 +783,10 @@ The mitigation, when implemented, would:
    - If the reporter didn't supply a version: the signal stays in
      its baseline tier.
 
-This is feasible in this project specifically because of the
-template discipline; in projects without that discipline the
-mitigation is much harder. We don't currently extract this signal;
-implementing it is a real piece of work (parsing the body, mapping
-versions to shas via tag/release walks) but tractable. Adding to
-"Open design questions" below if not already there.
+We don't currently extract this signal; implementing it is a real
+piece of work (parsing the body, mapping versions to shas via
+tag/release walks) but tractable for the repos whose templates
+support it.
 
 #### Reading the signals together
 
@@ -753,14 +822,75 @@ alongside the others:
   where the analysis was previously fooled. The diff between v1 and
   v2 is itself a measurement of how much the older view was wrong.
 
-### Workflow scaffolding (descriptive)
+### Agentic infrastructure (descriptive)
 
 Tracks the rate at which the agentic system's own infrastructure
 changes. Descriptive, not quality.
 
+The "agentic system's own infrastructure" is broader than
+``.github/workflows/``. The corpus splits into two eras:
+
+- *Pre-hive era* (repo start through the May 1-3 handoff). Spans
+  ACMM layers 1 through 5. Infrastructure includes GitHub Actions
+  workflows under ``.github/workflows/`` in the subjects, reusable
+  workflows imported from ``kubestellar/infra``, and the
+  per-CLAUDE.md instruction files the subjects ship for use by AI
+  tools. The v1 ACMM paper additionally listed agents that operated
+  in this era (we believe most of them appear in ``kubestellar/console``'s
+  commit history; surfacing them is an analysis we have not yet
+  run -- a SQL query against ``commit_file`` for paths matching
+  agent conventions would reveal them, with cohort analysis showing
+  when each came online). One phase late in this era is Andy's use
+  of Claude Code with looping; the infrastructure for that phase
+  included Andy's prompts, loop scripts, and Claude Code
+  configuration. Some of that may have been checked into a repo;
+  some may have lived on Andy's workstation only. The portion that
+  wasn't checked in is genuinely unobservable from our data.
+- *Hive era* (since the May 1-3 handoff). Everything in the pre-hive
+  list, plus hive's own configuration -- its ``agents/``, ``bin/``,
+  ``config/`` files, including the per-agent CLAUDE.md files (e.g.
+  the 902-line scanner CLAUDE.md), and the scheduled-runner setup
+  hive uses on the host where it runs.
+
+What we currently observe and don't:
+
+- We capture per-commit content of workflow files in subjects
+  (``console`` and, when added, ``docs``) and in the currently-narrow
+  ``support`` role for ``kubestellar/infra`` -- the reusable workflows.
+  We do not currently capture the broader file content of hive
+  (its ``agents/``, ``bin/``, ``config/``); see open task #16 on
+  broadening the path filter for support repos.
+- We capture commit-level metadata for hive (commit dates, authors,
+  per-file change counts and types) but not the file contents
+  themselves. So we can answer "when did hive's policy churn" but
+  not "what did the policy look like at time T."
+- We capture the full commit history of ``console``, including
+  whatever agent definitions or prompts were checked in there during
+  the pre-hive era. Whether the agents the v1 paper described are
+  fully captured depends on whether they were committed; if they
+  were, we have them. We have not yet run the analysis to enumerate
+  them.
+- For the Andy-Claude-Code-loop phase, configuration that wasn't
+  checked into a repo we extract is unobservable. Any analysis claim
+  about that phase needs that limitation stated.
+
+Metrics in this category, with the observability of each:
+
 - Number of distinct workflow files active per day
-- Workflow file change rate (uncollapsed and flurry-collapsed)
+  (workflows in subjects + infra; computable today)
+- Workflow file change rate, uncollapsed and flurry-collapsed
+  (computable today for workflows in subjects + infra)
 - Disabled/re-enabled status of each workflow over time
+  (inferred from gaps in workflow run streams; not yet implemented;
+  see the open question on capturing web-UI disables)
+- Pre-hive-era agent enumeration (a SQL query against
+  ``commit_file`` for paths matching agent conventions, with first/
+  last seen per path; computable today, not yet run)
+- Hive policy churn rate (commit count per day in hive's
+  ``agents/``, ``bin/``, ``config/``; computable today since we
+  have hive's commit metadata, just not the file contents)
+- Hive policy content snapshots over time (not computable today;
+  blocked by open task #16)
 
 ### Subject-area splits
 
@@ -1027,17 +1157,21 @@ intermediate steps should also be invocable individually for development.
 - **Version-aware filtering of resolution-quality signals.** The
   shared limitations on dissatisfaction signals include adoption
   lag, which biases time-windowed signals in both directions. A
-  partial mitigation specific to this project: the issue-reporting
-  templates ask for the version the reporter is using, often as a
-  release tag or git commit sha. Extracting that signal converts
-  adoption lag from an unknown bias into a filter -- complaints
-  from reporters who were on a version *not* containing the closing
-  PR's commit are adoption-lag noise and should be excluded from
-  quality signals; complaints from reporters who *were* on a
-  version including the fix become much stronger evidence of
-  resolution dissatisfaction. Implementation requires (a) parsing
-  the version field from the issue body, (b) building a
-  version-to-commit-shas map by walking the relevant repos' tags
+  partial mitigation works for `kubestellar/console` because its
+  issue-reporting template asks for the version the reporter is
+  using, often as a release tag or git commit sha. (This is a
+  feature of console's template specifically, not of the
+  kubestellar organization; other repos like docs may have
+  different templates and would need separate verification.)
+  Extracting that signal converts adoption lag from an unknown
+  bias into a filter -- complaints from reporters who were on a
+  version *not* containing the closing PR's commit are
+  adoption-lag noise and should be excluded from quality signals;
+  complaints from reporters who *were* on a version including the
+  fix become much stronger evidence of resolution dissatisfaction.
+  Implementation requires (a) parsing the version field from the
+  issue body, (b) building a version-to-commit-shas map by walking
+  the relevant repos' tags
   and release history. Tractable in this project because of the
   template discipline. Not yet implemented; described in detail in
   the "Resolution-quality signals" section under "Version-aware
