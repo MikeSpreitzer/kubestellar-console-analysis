@@ -63,7 +63,6 @@ def extract_reactions(
 
     log.info("refreshing reactions for %d issues/PRs in %s/%s", len(rows), owner, name)
     count = 0
-    skipped = 0
     max_updated_at: Optional[str] = since
 
     for row in rows:
@@ -71,18 +70,18 @@ def extract_reactions(
             _refresh_issue_reactions(
                 conn, gh, owner, name, row["issue_id"], row["number"]
             )
-            _refresh_comment_reactions(conn, gh, owner, name, row["issue_id"])
-            if row["is_pr"]:
-                _refresh_review_reactions(
-                    conn, gh, owner, name, row["issue_id"], row["number"]
-                )
         except requests.exceptions.HTTPError as exc:
             log.warning(
-                "skipping reactions for #%d in %s/%s: %s",
+                "skipping issue reactions for #%d in %s/%s: %s",
                 row["number"], owner, name, exc,
             )
-            skipped += 1
-            continue
+        _refresh_comment_reactions(
+            conn, gh, owner, name, row["issue_id"], row["number"]
+        )
+        if row["is_pr"]:
+            _refresh_review_reactions(
+                conn, gh, owner, name, row["issue_id"], row["number"]
+            )
 
         u = row["updated_at"]
         if u and (max_updated_at is None or u > max_updated_at):
@@ -99,8 +98,6 @@ def extract_reactions(
     if max_updated_at and max_updated_at != since:
         set_state(conn, state_key, max_updated_at)
 
-    if skipped:
-        log.warning("skipped %d reactions sets in %s/%s", skipped, owner, name)
     return count
 
 
@@ -142,18 +139,32 @@ def _refresh_comment_reactions(
     owner: str,
     name: str,
     issue_id: int,
+    number: int,
 ) -> None:
     comment_rows = conn.execute(
         "SELECT comment_id FROM comment WHERE issue_id = ?", (issue_id,)
     ).fetchall()
     for cr in comment_rows:
         comment_id = cr["comment_id"]
-        new = list(
-            gh.paginate(
-                f"/repos/{owner}/{name}/issues/comments/{comment_id}/reactions",
-                accept="application/vnd.github.squirrel-girl-preview+json",
+        try:
+            new = list(
+                gh.paginate(
+                    f"/repos/{owner}/{name}/issues/comments/{comment_id}/reactions",
+                    accept="application/vnd.github.squirrel-girl-preview+json",
+                )
             )
-        )
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                log.debug(
+                    "comment %d on #%d in %s/%s deleted server-side; skipping reactions",
+                    comment_id, number, owner, name,
+                )
+                continue
+            log.warning(
+                "skipping reactions for comment %d on #%d in %s/%s: %s",
+                comment_id, number, owner, name, exc,
+            )
+            continue
         with transaction(conn):
             conn.execute(
                 "DELETE FROM reaction WHERE target_kind = 'comment' AND target_id = ?",
@@ -187,9 +198,6 @@ def _refresh_review_reactions(
     ).fetchall()
     for rr in review_rows:
         review_id = rr["review_id"]
-        # Note: GitHub's review-reactions endpoint is on
-        # /pulls/{number}/reviews/{review_id}/reactions but is less
-        # commonly used; we fetch defensively and ignore 404.
         try:
             new = list(
                 gh.paginate(
@@ -197,8 +205,17 @@ def _refresh_review_reactions(
                     accept="application/vnd.github.squirrel-girl-preview+json",
                 )
             )
-        except Exception:
-            log.debug("review %d has no reactions endpoint", review_id)
+        except requests.exceptions.HTTPError as exc:
+            if exc.response is not None and exc.response.status_code == 404:
+                log.debug(
+                    "review %d on #%d in %s/%s has no reactions endpoint or was deleted",
+                    review_id, number, owner, name,
+                )
+                continue
+            log.warning(
+                "skipping reactions for review %d on #%d in %s/%s: %s",
+                review_id, number, owner, name, exc,
+            )
             continue
         with transaction(conn):
             conn.execute(
