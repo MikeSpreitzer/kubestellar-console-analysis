@@ -140,6 +140,85 @@ commit producer plot. Requires the git extractor to have run first:
       console-analysis \
       -m src.analysis.commit_authorship --config /config/config.yaml --verbose
 
+The three modules above use the coarse bot-vs-human credential
+classification. The three modules below use the full producer
+taxonomy from `src/classifier/rules.py` (`human-credentialed`,
+`copilot`, `claude-app`, `hive-scanner`, `hive-reviewer`,
+`hive-merger`, `prow`, `project-bot`, `netlify`, `dependabot`,
+`other-bot-app`, `unknown`).
+
+`authorship` produces an Issue→PR producer cross-tab as a heatmap
+(matplotlib PNG + Plotly HTML) plus a per-edge CSV. Edges from
+`linked_pr` rows tagged `pr_body_keyword` (the GitHub extractor's
+`closes`/`fixes`/`resolves` keyword scan) plus an in-memory
+close-time heuristic where the issue's `closed_at` is within 5
+minutes of a PR's `merged_at` and the closer matches the PR merger
+or author. Edge sources are kept distinct in the per-edge CSV so the
+reader can see how much of the cross-tab comes from each:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(pwd)/output:/output" \
+      console-analysis \
+      -m src.analysis.authorship --config /config/config.yaml --verbose
+
+To inspect the (issue, PR) tuples behind a particular cell in the
+cross-tab, filter the per-edge CSV. Each row is one
+(issue, PR, edge_source) tuple with both endpoints' producer
+classifications already computed. Columns are: `issue_id`, `pr_id`,
+`edge_source`, `issue_author_login`, `issue_producer`,
+`pr_author_login`, `pr_producer`. For example, to list edges where
+the issue producer is `hive-merger` and the PR producer is
+`copilot`:
+
+    awk -F, 'NR==1 || ($5=="hive-merger" && $7=="copilot")' \
+        output/csv/kubestellar_console/authorship_issue_to_pr_edges.csv
+
+The `edge_source` column distinguishes `linked_pr_keyword` edges
+(from `closes`/`fixes`/`resolves` keywords in PR bodies) from
+`heuristic_close_time` edges (the 5-minute-window heuristic). For
+joined detail like issue/PR titles or dates, query
+`data/db.sqlite` directly with the `issue_id` and `pr_id` values
+the CSV gives you.
+
+`speed` produces four speed-and-cadence metrics (issue-to-first-
+linked-PR latency, PR-open-to-merge, post-cutoff fast-close, and
+MTTR with first-close, cumulative-open, and final-close
+methodologies side by side). Per DESIGN.md these are speed metrics,
+not quality metrics. Optional `--fast-close-start YYYY-MM-DD`
+overrides the default `2026-05-03` cutoff for the fast-close metric
+only:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(pwd)/output:/output" \
+      console-analysis \
+      -m src.analysis.speed --config /config/config.yaml --verbose
+
+`resolution_quality` produces the two-regime resolution-quality
+signals from DESIGN.md: high-precision/low-recall (reopen by
+original reporter; same-reporter follow-up citing the closing PR)
+and low-precision/higher-recall (post-close phrase matches in
+stronger and weaker tiers; cross-reference patterns split before
+and after close). Every output CSV is preceded by a single-line
+caveat header naming the four shared limitations from DESIGN.md
+(silent drops, bidirectional adoption lag, attention non-uniformity,
+multi-case bundling); convergence across signals is informative,
+divergence is ambiguous, and a low reading in every signal is *not*
+evidence the underlying phenomenon is absent:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(pwd)/output:/output" \
+      console-analysis \
+      -m src.analysis.resolution_quality --config /config/config.yaml --verbose
+
 Each plot is produced in three forms:
 - `output/plots/<repo>/*.png` -- static, portable, paste-into-doc
 - `output/html/<repo>/*.html` -- interactive (Plotly), hover for
@@ -158,8 +237,13 @@ comments, and reviews, applies a shared rule list (see
 `src/classifier/rules.py`), and writes verdicts to the
 `producer_classification` table. Required before analyses that join
 to that table; the existing analysis modules also import from
-`src/classifier/rules` directly for inline credential classification
-during plotting.
+`src/classifier/rules` directly during plotting -- `first_look`,
+`drilldown`, and `commit_authorship` use it for the coarse
+credential class, while `authorship`, `speed`, and
+`resolution_quality` use the full producer taxonomy. Equivalent to
+joining to `producer_classification` because the rule list is the
+same; a query that wanted verdicts at classifier-version granularity
+would need to read the table.
 
 This is a write operation on the database, so the data mount is RW
 and we use the same UID-mapping pattern as the extractors:

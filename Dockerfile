@@ -28,6 +28,10 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY src /app/src
 COPY tests /app/tests
 
+# One-off diagnostics living at the repo root. Kept out of src/ and
+# tests/ because they aren't part of the pipeline and aren't tests.
+COPY diagnose_authorship_heuristic.py /app/diagnose_authorship_heuristic.py
+
 # Expected runtime layout (provided by bind mounts at `docker run`):
 #   /app/src         -- source code (in image)
 #   /config          -- config.yaml lives here, bind-mounted from host

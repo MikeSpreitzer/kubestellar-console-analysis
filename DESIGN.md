@@ -231,7 +231,7 @@ artifacts. A future refinement would be to switch the per-producer
 plots to a small-multiples layout (one panel per producer) that
 renders well in both PNG and HTML.
 
-The analysis layer currently exposes three entry points:
+The analysis layer currently exposes six entry points:
 - ``src.analysis.first_look`` -- bot- vs. human-credential
   daily-binned plots over GitHub-side data (issues, PRs, comments).
 - ``src.analysis.drilldown`` -- follow-ups that surface specific
@@ -242,6 +242,21 @@ The analysis layer currently exposes three entry points:
   granularity using the git-extractor's
   [``commit_``](SCHEMA.md#commit_) table, plus a
   cross-tab joining commit authorship to PR identity.
+- ``src.analysis.authorship`` -- Issue->PR producer cross-tab using
+  the full producer taxonomy from ``classifier/rules.py`` (not the
+  coarse credential split). Edges from ``linked_pr.pr_body_keyword``
+  plus a 5-minute close-time heuristic.
+- ``src.analysis.speed`` -- speed and cadence metrics
+  (issue-to-first-linked-PR latency, PR-open-to-merge,
+  post-cutoff fast-close, MTTR with three methodologies side by
+  side). Uses the full producer taxonomy.
+- ``src.analysis.resolution_quality`` -- the two-regime
+  resolution-quality signals (high-precision/low-recall:
+  reopen-by-original-reporter, follow-up-citing-close-PR;
+  low-precision/higher-recall: post-close phrase matches in two
+  tiers, cross-reference patterns split before/after close). Every
+  output CSV is preceded by a caveat header naming the four shared
+  limitations from this document. Uses the full producer taxonomy.
 
 For the specific plots and tables each entry point produces today, see
 [Current analysis outputs](#current-analysis-outputs) below.
@@ -251,17 +266,28 @@ For the specific plots and tables each entry point produces today, see
 The list below enumerates exactly what each entry point produces today.
 It will grow as we add plots; the layer's architecture above does not.
 
-**Classification used in the current outputs.** All current plots split
-activity into ``bot-credentialed`` (actor login ends in ``[bot]``),
-``human-credentialed`` (anything else), and ``unknown`` (the field was
-NULL). This is a credential classification, not a producer
-classification: human-credentialed work is an upper bound on actual
-human work, since humans may run automation under their own
-credentials. The
+**Classification used in the current outputs.** Outputs split into
+two groups by classification granularity.
+
+The earlier modules -- ``first_look``, ``drilldown``, and
+``commit_authorship`` -- split activity into ``bot-credentialed``
+(actor login ends in ``[bot]``), ``human-credentialed`` (anything
+else), and ``unknown`` (the field was NULL). This is a credential
+classification, not a producer classification: human-credentialed
+work is an upper bound on actual human work, since humans may run
+automation under their own credentials.
+
+The later modules -- ``authorship``, ``speed``, and
+``resolution_quality`` -- use the full producer taxonomy from
+``src/classifier/rules.py`` (``human-credentialed``, ``copilot``,
+``claude-app``, ``hive-scanner``, ``hive-reviewer``, ``hive-merger``,
+``prow``, ``project-bot``, ``netlify``, ``dependabot``,
+``other-bot-app``, ``unknown``). They invoke the classifier rules
+inline rather than joining to the
 [``producer_classification``](SCHEMA.md#producer_classification)
-table from layer 2 is not
-used by these outputs; that's deliberate -- the current outputs are a
-"first look" that precedes the classifier.
+table; verdicts are equivalent because the rule list is the same,
+but a query that wanted verdicts at classifier-version granularity
+would need to read the table.
 
 **``first_look``: six daily-binned stacked-area plots, per subject
 repo.** Each is rendered to PNG, HTML, and CSV.
@@ -358,6 +384,78 @@ automation is observed).
    omitted or stripped) are indistinguishable from hand-typed
    commits at the metadata level. Useful for tracking era
    transitions in a project's adoption of AI-assisted development.
+
+**``authorship``: Issue->PR producer cross-tab.** Edges from
+``linked_pr`` rows with ``link_source = 'pr_body_keyword'``
+(populated by the GitHub extractor from ``closes``/``fixes``/
+``resolves`` keywords in PR bodies) plus an in-memory close-time
+heuristic where the issue's ``closed_at`` is within 5 minutes of a
+PR's ``merged_at`` and the closer matches the PR merger or author.
+Edge sources are kept distinct in the per-edge CSV so the reader
+can see how much of the cross-tab comes from each.
+
+1. **Issue-author x PR-author cross-tab** -- counts of (issue
+   producer, PR producer) pairs across all edges. CSV plus heatmap
+   PNG/HTML.
+2. **Per-edge dump** -- one row per (issue, PR, edge_source) tuple
+   with both endpoints' producer classifications, for follow-up
+   inspection.
+
+**``speed``: speed and cadence metrics.** Per DESIGN.md these are
+speed metrics, not quality metrics; a high-throughput system can be
+shipping bad work quickly. All histogram plots use a shared
+log-minute x-axis from 0.5 minutes to 90 days.
+
+1. **Issue open -> first linked PR merge** -- full-history
+   distribution; producer breakdown by issue author. Edges from
+   ``linked_pr`` only.
+2. **PR open -> merge** -- full-history distribution; producer
+   breakdown by PR author.
+3. **Fast-close (post-cutoff)** -- histogram of close-latency for
+   issues created on or after a configurable cutoff (default
+   ``2026-05-03``, ``--fast-close-start`` overrides), plus a
+   threshold table at {1, 5, 15, 60} minutes giving counts and
+   closer-producer breakdown at each threshold.
+4. **MTTR** -- per-issue, three methodologies side by side:
+   first-close interval, final-close interval, and cumulative-open
+   time (sum of open->close intervals over the issue's life). The
+   gap between cumulative-open and final-close is reported.
+   Reopen counts are tracked per issue. Broken out by closer
+   producer.
+
+**``resolution_quality``: triangulation signals across two precision
+regimes.** Per the "Resolution-quality signals" section below, no
+single signal here is a measurement; convergence across signals is
+informative, divergence is ambiguous, low readings everywhere are
+*not* evidence the underlying phenomenon is absent. Every output CSV
+is preceded by a single-line caveat header naming the four shared
+limitations: silent drops, bidirectional adoption lag, attention
+non-uniformity, multi-case bundling.
+
+High-precision / low-recall:
+
+1. **Reopen by original reporter** -- ``issue_event`` reopens where
+   ``actor_id == author_id``. Per-event CSV plus a summary by closer
+   producer (CSV plus bar PNG/HTML).
+2. **Same-reporter follow-up citing closing PR** -- for each closed
+   (issue, closing-PR) pair from ``linked_pr``, later same-reporter
+   issues whose body or first comment contains either
+   ``owner/repo#N`` or bare ``#N`` matching the closing PR's
+   number. Per-edge CSV plus a summary by reporter producer.
+
+Low-precision / higher-recall:
+
+3. **Post-close phrase matches** -- two tiers (``stronger``,
+   ``weaker``) of dissatisfaction phrases substring-matched
+   (case-insensitive) against comments posted after the issue's
+   ``closed_at``. A comment hitting both tiers gets two rows. Per
+   tier: a per-match CSV, a summary by closer producer (CSV plus
+   bar PNG/HTML), and an ``is_reporter_followup`` flag promoting
+   matches by the original reporter toward the high-precision tier.
+4. **Cross-reference patterns** -- ``cross-referenced`` events on
+   closed issues, split into ``before_close`` / ``after_close`` /
+   ``never_closed`` and crossed with closer producer. Per-event CSV
+   plus a stacked-bar cross-tab PNG/HTML.
 
 ### Layer 4 — interpretation (out of scope for code)
 
@@ -573,8 +671,11 @@ These are the foundational descriptive plots -- they show *who* does
   (already in first_look, same caveat)
 - Issue authorship by producer, daily, time series
   (already in first_look, same caveat)
-- Issue → PR producer mapping (who-wrote-issue × who-wrote-PR), weekly
-  (not yet implemented)
+- Issue → PR producer mapping (who-wrote-issue × who-wrote-PR)
+  (in `authorship.py`; full-history cross-tab as heatmap PNG/HTML
+  plus per-edge CSV; edges from `linked_pr.pr_body_keyword` plus a
+  5-minute close-time heuristic with edge sources kept distinct;
+  not currently broken out by week)
 
 ### Speed and cadence (not quality)
 
@@ -1053,6 +1154,23 @@ preserved here so future re-runs follow the same conventions:
   fetch concurrency to 1; fetch logs as a separate process that does
   not touch SQLite at all and reconciles after; or do the
   named-volume migration described under "Open design questions".
+- **Datetime arithmetic stays unit-aware.** SQLite-stored ISO
+  timestamps come back through ``pd.to_datetime(..., utc=True)`` as
+  ``datetime64[us, UTC]`` on the pandas/numpy versions the container
+  currently pins (pandas 3.x, numpy 2.x). ``Timestamp.value`` and
+  ``Timedelta.value`` are unconditionally nanoseconds, so a bare
+  ``astype('int64')`` on a datetime Series silently yields
+  microseconds and any comparison against ``.value`` is off by 1000x
+  -- a class of bug that produces zero matches rather than a loud
+  failure. The convention in this codebase is therefore to do
+  datetime arithmetic via ``Timestamp - Timestamp``,
+  ``Series.dt.total_seconds()``, and ``Series.dt.floor("D")``, which
+  are all unit-aware. The one place that needs an int64 fast path
+  (``authorship._heuristic_edges``'s binary search) goes through an
+  explicit ``.astype("datetime64[ns, UTC]").astype("int64")`` to
+  force the unit before integer arithmetic. New code that wants to
+  mix datetime-derived integers with ``Timestamp.value`` /
+  ``Timedelta.value`` should follow that pattern.
 
 ## Re-running the analysis
 
