@@ -28,7 +28,13 @@ The producer taxonomy values used here are:
 - ``hive-reviewer`` -- the Claude-driven reviewer that committed under
   ``reviewer@claude-dev.local``. (We do not have a dedicated GitHub
   app login for this; the email is the only signal.)
-- ``hive-merger`` -- the kubestellar-hive[bot] App when seen merging.
+- ``hive-bot`` -- the ``kubestellar-hive[bot]`` GitHub App identity,
+  regardless of role. The same login authors issues, opens PRs, and
+  merges PRs; the classifier sees only the actor identity, not the
+  role, so the producer label is identity-only. Analyses that care
+  about the merging role specifically (e.g., "PRs merged per day,
+  by merger credential") should join via PR-merger fields, not via
+  the artifact-author classification this rule produces.
 - ``other-bot-app`` -- any GitHub App login ending in ``[bot]`` that
   isn't more specifically classified above. Currently dominated by
   ``github-actions[bot]``, which is the runner identity for any
@@ -72,7 +78,7 @@ PRODUCER_NETLIFY = "netlify"
 PRODUCER_DEPENDABOT = "dependabot"
 PRODUCER_HIVE_SCANNER = "hive-scanner"
 PRODUCER_HIVE_REVIEWER = "hive-reviewer"
-PRODUCER_HIVE_MERGER = "hive-merger"
+PRODUCER_HIVE_BOT = "hive-bot"
 PRODUCER_OTHER_BOT_APP = "other-bot-app"
 PRODUCER_PROJECT_BOT = "project-bot"
 
@@ -110,7 +116,7 @@ LOGIN_TO_PRODUCER: dict[str, str] = {
     "copilot-pull-request-reviewer[bot]": PRODUCER_COPILOT,
     "copilot-swe-agent[bot]":             PRODUCER_COPILOT,
     "claude[bot]":                        PRODUCER_CLAUDE_APP,
-    "kubestellar-hive[bot]":              PRODUCER_HIVE_MERGER,
+    "kubestellar-hive[bot]":              PRODUCER_HIVE_BOT,
     "kubestellar-prow[bot]":              PRODUCER_PROW,
     "netlify[bot]":                       PRODUCER_NETLIFY,
     "dependabot[bot]":                    PRODUCER_DEPENDABOT,

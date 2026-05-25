@@ -412,7 +412,7 @@ target_id           INTEGER NOT NULL           -- references the appropriate sou
 source              TEXT NOT NULL              -- 'journal' | 'workflow_run' | 'marker' | 'unknown'
 producer            TEXT NOT NULL              -- e.g. 'human-credentialed',
                                                -- 'copilot', 'hive-scanner',
-                                               -- 'hive-merger', 'project-bot',
+                                               -- 'hive-bot', 'project-bot',
                                                -- 'other-bot-app', 'unknown'
 sub_producer        TEXT                       -- finer-grained: the matched login or email
 basis               TEXT                       -- short explanation:

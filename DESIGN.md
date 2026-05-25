@@ -242,9 +242,12 @@ The analysis layer currently exposes six entry points:
   granularity using the git-extractor's
   [``commit_``](SCHEMA.md#commit_) table, plus a
   cross-tab joining commit authorship to PR identity.
-- ``src.analysis.authorship`` -- Issue->PR producer cross-tab using
+- ``src.analysis.authorship`` -- Issue->PR producer cross-tabs using
   the full producer taxonomy from ``classifier/rules.py`` (not the
-  coarse credential split). Edges from ``linked_pr.pr_body_keyword``
+  coarse credential split). Two cross-tabs are produced: a
+  full-history view, and a windowed view restricted to edges whose
+  closing PR's ``merged_at`` is on or after a configurable cutoff
+  (default ``2026-05-03``). Edges from ``linked_pr.pr_body_keyword``
   plus a 5-minute close-time heuristic.
 - ``src.analysis.speed`` -- speed and cadence metrics
   (issue-to-first-linked-PR latency, PR-open-to-merge,
@@ -280,7 +283,7 @@ automation under their own credentials.
 The later modules -- ``authorship``, ``speed``, and
 ``resolution_quality`` -- use the full producer taxonomy from
 ``src/classifier/rules.py`` (``human-credentialed``, ``copilot``,
-``claude-app``, ``hive-scanner``, ``hive-reviewer``, ``hive-merger``,
+``claude-app``, ``hive-scanner``, ``hive-reviewer``, ``hive-bot``,
 ``prow``, ``project-bot``, ``netlify``, ``dependabot``,
 ``other-bot-app``, ``unknown``). They invoke the classifier rules
 inline rather than joining to the
@@ -385,21 +388,31 @@ automation is observed).
    commits at the metadata level. Useful for tracking era
    transitions in a project's adoption of AI-assisted development.
 
-**``authorship``: Issue->PR producer cross-tab.** Edges from
+**``authorship``: Issue->PR producer cross-tabs.** Edges from
 ``linked_pr`` rows with ``link_source = 'pr_body_keyword'``
 (populated by the GitHub extractor from ``closes``/``fixes``/
 ``resolves`` keywords in PR bodies) plus an in-memory close-time
 heuristic where the issue's ``closed_at`` is within 5 minutes of a
 PR's ``merged_at`` and the closer matches the PR merger or author.
 Edge sources are kept distinct in the per-edge CSV so the reader
-can see how much of the cross-tab comes from each.
+can see how much of either cross-tab comes from each.
 
-1. **Issue-author x PR-author cross-tab** -- counts of (issue
-   producer, PR producer) pairs across all edges. CSV plus heatmap
-   PNG/HTML.
-2. **Per-edge dump** -- one row per (issue, PR, edge_source) tuple
+1. **Full-history cross-tab** -- counts of (issue producer, PR
+   producer) pairs across all edges. CSV plus heatmap PNG/HTML.
+2. **Windowed cross-tab** -- restricted to edges whose closing PR's
+   ``merged_at`` is on or after the configured cutoff
+   (``--start-date YYYY-MM-DD``, default ``2026-05-03``). Same shape
+   as the full-history cross-tab; the cutoff is intended to bracket
+   the L5->L6 hive handoff so the post-handoff shape can be read
+   independently of the pre-handoff history. CSV plus heatmap
+   PNG/HTML; output filenames carry the ``_since_<DATE>`` suffix.
+3. **Per-edge dump** -- one row per (issue, PR, edge_source) tuple
    with both endpoints' producer classifications, for follow-up
-   inspection.
+   inspection. Carries both the analysis database's primary keys
+   (``issue_id``, ``pr_id``) and the GitHub-visible numbers
+   (``issue_number``, ``pr_number``) so a row can be looked up
+   directly on the GitHub UI; also carries ``pr_merged_at`` so the
+   same file can be re-windowed without re-running the module.
 
 **``speed``: speed and cadence metrics.** Per DESIGN.md these are
 speed metrics, not quality metrics; a high-throughput system can be
@@ -487,8 +500,12 @@ predicates that produce them):
   bookkeeping artifacts.
 - ``netlify`` — the ``netlify[bot]`` actor (deploy-preview comments).
 - ``dependabot`` — the ``dependabot[bot]`` actor.
-- ``hive-merger`` — the ``kubestellar-hive[bot]`` App (the GitHub-app
-  identity hive uses to merge PRs).
+- ``hive-bot`` — the ``kubestellar-hive[bot]`` GitHub App identity,
+  regardless of role. The same identity authors issues, opens PRs,
+  and merges PRs; the classifier sees only the actor identity, so
+  this label is identity-only. Analyses that care about the merging
+  role specifically should join via PR-merger fields, not via this
+  artifact-author classification.
 - ``hive-scanner`` — hive's scanner sub-agent, identified by the
   ``scanner@kubestellar.io`` email and related kubestellar-org email
   identities.
@@ -672,10 +689,12 @@ These are the foundational descriptive plots -- they show *who* does
 - Issue authorship by producer, daily, time series
   (already in first_look, same caveat)
 - Issue → PR producer mapping (who-wrote-issue × who-wrote-PR)
-  (in `authorship.py`; full-history cross-tab as heatmap PNG/HTML
-  plus per-edge CSV; edges from `linked_pr.pr_body_keyword` plus a
-  5-minute close-time heuristic with edge sources kept distinct;
-  not currently broken out by week)
+  (in `authorship.py`; two cross-tabs as heatmap PNG/HTML --
+  full-history and windowed since a configurable cutoff -- plus a
+  per-edge CSV that carries `pr_merged_at` for re-windowing; edges
+  from `linked_pr.pr_body_keyword` plus a 5-minute close-time
+  heuristic with edge sources kept distinct; not currently broken
+  out by week)
 
 ### Speed and cadence (not quality)
 

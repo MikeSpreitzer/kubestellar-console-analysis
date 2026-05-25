@@ -22,13 +22,32 @@ The heuristic edges are kept distinct from the ``linked_pr`` ones in
 the per-edge CSV so the reader can see how much of the cross-tab comes
 from each source.
 
+Two cross-tabs are produced per subject repo:
+
+- A *full-history* cross-tab covering every edge.
+- A *windowed* cross-tab restricted to edges whose closing PR's
+  ``merged_at`` is on or after a configurable cutoff (default
+  ``2026-05-03``, ``--start-date YYYY-MM-DD`` overrides). The cutoff
+  is intended to bracket the L5->L6 (hive) handoff so the post-handoff
+  shape can be read independently of the pre-handoff history that
+  would otherwise dominate the heatmap.
+
 Outputs to ``output/{plots,html,csv}/<repo>/authorship_*``:
 
-- ``authorship_issue_to_pr_crosstab.csv`` -- the cross-tab counts.
-- ``authorship_issue_to_pr_crosstab.png`` and ``.html`` -- heatmap
-  rendering of the cross-tab.
+- ``authorship_issue_to_pr_crosstab_full_history.csv`` -- full-history
+  cross-tab counts.
+- ``authorship_issue_to_pr_crosstab_full_history.png`` / ``.html`` --
+  heatmap of the full-history cross-tab.
+- ``authorship_issue_to_pr_crosstab_since_<DATE>.csv`` -- windowed
+  cross-tab counts.
+- ``authorship_issue_to_pr_crosstab_since_<DATE>.png`` / ``.html`` --
+  heatmap of the windowed cross-tab.
 - ``authorship_issue_to_pr_edges.csv`` -- per-edge dump (one row per
-  (issue, pr, link_source) tuple) for follow-up analysis.
+  (issue, pr, edge_source) tuple) for follow-up analysis. Columns
+  include both the analysis database's primary keys (``issue_id``,
+  ``pr_id``) and the GitHub-visible numbers (``issue_number``,
+  ``pr_number``), plus ``pr_merged_at`` so a reader can re-window
+  the data without re-running.
 
 Run as
 ``python -m src.analysis.authorship --config /config/config.yaml``.
@@ -78,7 +97,7 @@ PRODUCER_DISPLAY_ORDER = (
     "claude-app",
     "hive-scanner",
     "hive-reviewer",
-    "hive-merger",
+    "hive-bot",
     "prow",
     "project-bot",
     "netlify",
@@ -142,11 +161,14 @@ def _linked_edges(
         SELECT
             lp.issue_id     AS issue_id,
             lp.pr_id        AS pr_id,
+            i_iss.number    AS issue_number,
+            i_pr.number     AS pr_number,
             lp.link_source  AS link_source,
             i_iss.author_id AS issue_author_id,
             a_iss.login     AS issue_author_login,
             i_pr.author_id  AS pr_author_id,
             a_pr.login      AS pr_author_login,
+            pr.merged_at    AS pr_merged_at,
             pr.merged_by_id AS pr_merger_id,
             a_mer.login     AS pr_merger_login,
             i_iss.closed_by_id AS issue_closer_id,
@@ -187,6 +209,7 @@ def _heuristic_edges(
         """
         SELECT
             i.issue_id     AS issue_id,
+            i.number       AS issue_number,
             i.closed_at    AS closed_at,
             i.closed_by_id AS issue_closer_id,
             a_clo.login    AS issue_closer_login,
@@ -210,6 +233,7 @@ def _heuristic_edges(
         """
         SELECT
             i.issue_id     AS pr_id,
+            i.number       AS pr_number,
             pr.merged_at   AS merged_at,
             pr.merged_by_id AS pr_merger_id,
             a_mer.login    AS pr_merger_login,
@@ -277,8 +301,11 @@ def _heuristic_edges(
             candidates.append({
                 "issue_id":           issue["issue_id"],
                 "pr_id":              pr["pr_id"],
+                "issue_number":       issue["issue_number"],
+                "pr_number":          pr["pr_number"],
                 "issue_author_login": issue["issue_author_login"],
                 "pr_author_login":    pr["pr_author_login"],
+                "pr_merged_at":       pr["merged_at"],
                 "pr_merger_login":    pr["pr_merger_login"],
                 "issue_closer_login": issue["issue_closer_login"],
                 "edge_source":        "heuristic_close_time",
@@ -399,6 +426,8 @@ def run_for_repo(
     owner: str,
     name: str,
     output_dir: Path,
+    *,
+    start_date: str,
 ) -> None:
     repo_row = conn.execute(
         "SELECT repo_id FROM repo WHERE owner = ? AND name = ?",
@@ -420,7 +449,10 @@ def run_for_repo(
     csvs  = output_dir / "csv"  / safe_slug
 
     edges_out = edges[[
-        "issue_id", "pr_id", "edge_source",
+        "issue_id", "issue_number",
+        "pr_id", "pr_number",
+        "edge_source",
+        "pr_merged_at",
         "issue_author_login", "issue_producer",
         "pr_author_login", "pr_producer",
     ]].sort_values(["issue_id", "pr_id"])
@@ -429,19 +461,53 @@ def run_for_repo(
     edges_out.to_csv(edges_path, index=False)
     log.info("wrote %s (%d edges)", edges_path, len(edges_out))
 
-    ct = _crosstab(edges)
-    crosstab_path = csvs / "authorship_issue_to_pr_crosstab.csv"
-    ct.to_csv(crosstab_path)
+    # Full-history crosstab: every edge, regardless of merge date.
+    ct_full = _crosstab(edges)
+    crosstab_path = csvs / "authorship_issue_to_pr_crosstab_full_history.csv"
+    ct_full.to_csv(crosstab_path)
     log.info("wrote %s", crosstab_path)
 
-    title = f"Issue author producer x PR author producer ({owner}/{name})"
     _plot_heatmap(
-        ct,
-        title=title,
-        out_png=plots / "authorship_issue_to_pr_crosstab.png",
-        out_html=htmls / "authorship_issue_to_pr_crosstab.html",
-        tab_title=f"{name}: issue->PR producer crosstab",
+        ct_full,
+        title=(
+            f"Issue author producer x PR author producer "
+            f"-- full history ({owner}/{name})"
+        ),
+        out_png=plots / "authorship_issue_to_pr_crosstab_full_history.png",
+        out_html=htmls / "authorship_issue_to_pr_crosstab_full_history.html",
+        tab_title=f"{name}: issue->PR producer (full history)",
     )
+
+    # Windowed crosstab: edges whose closing PR merged on/after start_date.
+    # Compare ISO strings directly; SQLite stores timestamps lexicographically
+    # comparable so this works without parsing.
+    edges_since = edges[
+        edges["pr_merged_at"].notna()
+        & (edges["pr_merged_at"] >= start_date)
+    ]
+    if edges_since.empty:
+        log.info(
+            "[%s/%s] no edges with pr_merged_at >= %s; skipping windowed crosstab",
+            owner, name, start_date,
+        )
+    else:
+        ct_since = _crosstab(edges_since)
+        crosstab_since_path = (
+            csvs / f"authorship_issue_to_pr_crosstab_since_{start_date}.csv"
+        )
+        ct_since.to_csv(crosstab_since_path)
+        log.info("wrote %s (%d edges)", crosstab_since_path, len(edges_since))
+
+        _plot_heatmap(
+            ct_since,
+            title=(
+                f"Issue author producer x PR author producer "
+                f"-- since {start_date} ({owner}/{name})"
+            ),
+            out_png=plots / f"authorship_issue_to_pr_crosstab_since_{start_date}.png",
+            out_html=htmls / f"authorship_issue_to_pr_crosstab_since_{start_date}.html",
+            tab_title=f"{name}: issue->PR producer (since {start_date})",
+        )
 
     by_source = (
         edges.groupby("edge_source").size().rename("edges").reset_index()
@@ -452,10 +518,22 @@ def run_for_repo(
     )
 
 
+DEFAULT_START_DATE = "2026-05-03"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--config", required=True, help="path to config.yaml")
     p.add_argument("--verbose", action="store_true")
+    p.add_argument(
+        "--start-date",
+        default=DEFAULT_START_DATE,
+        help=(
+            "ISO date (YYYY-MM-DD) for the windowed cross-tab's lower bound, "
+            "matched against the closing PR's merged_at; default "
+            f"{DEFAULT_START_DATE}. The full-history cross-tab is unaffected."
+        ),
+    )
     args = p.parse_args(argv)
 
     _setup_logging(args.verbose)
@@ -470,7 +548,10 @@ def main(argv: list[str] | None = None) -> int:
             if repo.role not in ("subject", "both"):
                 continue
             log.info("authorship: %s/%s", repo.owner, repo.name)
-            run_for_repo(conn, repo.owner, repo.name, output_dir)
+            run_for_repo(
+                conn, repo.owner, repo.name, output_dir,
+                start_date=args.start_date,
+            )
     finally:
         conn.close()
     return 0

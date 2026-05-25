@@ -92,6 +92,96 @@ arguments:
 The git extractor doesn't talk to GitHub, so the `GITHUB_TOKEN`
 environment variable can be omitted for it.
 
+## Running the classifier
+
+The classifier walks every subject repo's issues, PRs, commits,
+comments, and reviews, applies a shared rule list (see
+`src/classifier/rules.py`), and writes verdicts to the
+`producer_classification` table. Required before analyses that join
+to that table; the existing analysis modules also import from
+`src/classifier/rules` directly during plotting -- `first_look`,
+`drilldown`, and `commit_authorship` use it for the coarse
+credential class, while `authorship`, `speed`, and
+`resolution_quality` use the full producer taxonomy. Equivalent to
+joining to `producer_classification` because the rule list is the
+same; a query that wanted verdicts at classifier-version granularity
+would need to read the table.
+
+This is a write operation on the database, so the data mount is RW
+and we use the same UID-mapping pattern as the extractors:
+
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      console-analysis \
+      -m src.classifier --config /config/config.yaml --verbose
+
+Re-running with the same `CLASSIFIER_VERSION` (defined at the top of
+`src/classifier/main.py`) replaces existing rows for that version.
+Re-running with a new version adds rows alongside; old verdicts are
+preserved so versions can be compared.
+
+### Inspecting the classifier output
+
+The classifier writes one row per `(target_kind, target_id, source,
+classifier_version)` tuple to the
+[`producer_classification`](SCHEMA.md#producer_classification) table.
+A few example queries (run on the host with `sqlite3 data/db.sqlite`;
+substitute `'v3'` with whatever version the classifier last ran with):
+
+Producer breakdown across all artifact kinds:
+
+    SELECT producer, COUNT(*) n
+    FROM producer_classification
+    WHERE classifier_version = 'v3'
+    GROUP BY producer
+    ORDER BY n DESC;
+
+Producer breakdown for one kind:
+
+    SELECT producer, COUNT(*) n
+    FROM producer_classification
+    WHERE classifier_version = 'v3' AND target_kind = 'pr'
+    GROUP BY producer
+    ORDER BY n DESC;
+
+Sub-producer detail within `other-bot-app`:
+
+    SELECT sub_producer, COUNT(*) n
+    FROM producer_classification
+    WHERE classifier_version = 'v3' AND producer = 'other-bot-app'
+    GROUP BY sub_producer
+    ORDER BY n DESC;
+
+Compare two classifier versions on the same artifact:
+
+    SELECT a.producer AS old_producer, b.producer AS new_producer, COUNT(*) n
+    FROM producer_classification a
+    JOIN producer_classification b
+      ON a.target_kind = b.target_kind
+     AND a.target_id = b.target_id
+     AND a.source = b.source
+    WHERE a.classifier_version = 'v2' AND b.classifier_version = 'v3'
+    GROUP BY a.producer, b.producer
+    ORDER BY n DESC;
+
+Join classification back to the source artifact (PRs example):
+
+    SELECT i.number, i.title, pc.producer, pc.sub_producer
+    FROM issue i
+    JOIN producer_classification pc
+      ON pc.target_kind = 'pr' AND pc.target_id = i.issue_id
+    WHERE i.is_pr = 1
+      AND pc.classifier_version = 'v3'
+      AND pc.producer = 'hive-bot'
+    LIMIT 20;
+
+The other artifact kinds use `target_kind = 'issue'`, `'commit'`,
+`'comment'`, or `'review'` and join to the corresponding source
+table (see [`SCHEMA.md`](SCHEMA.md) for which key field each
+`target_id` references).
+
 ## Running the analysis layer
 
 The analysis modules read from the local sqlite database (via a
@@ -144,17 +234,24 @@ The three modules above use the coarse bot-vs-human credential
 classification. The three modules below use the full producer
 taxonomy from `src/classifier/rules.py` (`human-credentialed`,
 `copilot`, `claude-app`, `hive-scanner`, `hive-reviewer`,
-`hive-merger`, `prow`, `project-bot`, `netlify`, `dependabot`,
+`hive-bot`, `prow`, `project-bot`, `netlify`, `dependabot`,
 `other-bot-app`, `unknown`).
 
-`authorship` produces an Issue→PR producer cross-tab as a heatmap
-(matplotlib PNG + Plotly HTML) plus a per-edge CSV. Edges from
-`linked_pr` rows tagged `pr_body_keyword` (the GitHub extractor's
-`closes`/`fixes`/`resolves` keyword scan) plus an in-memory
-close-time heuristic where the issue's `closed_at` is within 5
-minutes of a PR's `merged_at` and the closer matches the PR merger
-or author. Edge sources are kept distinct in the per-edge CSV so the
-reader can see how much of the cross-tab comes from each:
+`authorship` produces two Issue→PR producer cross-tabs (each as a
+heatmap PNG + Plotly HTML + CSV) plus a per-edge CSV. The first
+cross-tab covers the full repo history; the second is restricted to
+edges whose closing PR's `merged_at` is on or after a configurable
+cutoff (`--start-date YYYY-MM-DD`, default `2026-05-03`), intended
+to bracket the L5→L6 hive handoff so the post-handoff shape isn't
+swamped by the pre-handoff history.
+
+Edges come from `linked_pr` rows tagged `pr_body_keyword` (the
+GitHub extractor's `closes`/`fixes`/`resolves` keyword scan) plus
+an in-memory close-time heuristic where the issue's `closed_at` is
+within 5 minutes of a PR's `merged_at` and the closer matches the
+PR merger or author. Edge sources are kept distinct in the per-edge
+CSV so the reader can see how much of either cross-tab comes from
+each source:
 
     docker run --rm \
       --user "$(id -u):$(id -g)" \
@@ -164,24 +261,27 @@ reader can see how much of the cross-tab comes from each:
       console-analysis \
       -m src.analysis.authorship --config /config/config.yaml --verbose
 
-To inspect the (issue, PR) tuples behind a particular cell in the
+To inspect the (issue, PR) tuples behind a particular cell in either
 cross-tab, filter the per-edge CSV. Each row is one
 (issue, PR, edge_source) tuple with both endpoints' producer
-classifications already computed. Columns are: `issue_id`, `pr_id`,
-`edge_source`, `issue_author_login`, `issue_producer`,
+classifications already computed. Columns are: `issue_id`,
+`issue_number`, `pr_id`, `pr_number`, `edge_source`,
+`pr_merged_at`, `issue_author_login`, `issue_producer`,
 `pr_author_login`, `pr_producer`. For example, to list edges where
-the issue producer is `hive-merger` and the PR producer is
-`copilot`:
+the issue producer is `hive-bot` and the PR producer is `copilot`:
 
-    awk -F, 'NR==1 || ($5=="hive-merger" && $7=="copilot")' \
+    awk -F, 'NR==1 || ($8=="hive-bot" && $10=="copilot")' \
         output/csv/kubestellar_console/authorship_issue_to_pr_edges.csv
 
 The `edge_source` column distinguishes `linked_pr_keyword` edges
 (from `closes`/`fixes`/`resolves` keywords in PR bodies) from
-`heuristic_close_time` edges (the 5-minute-window heuristic). For
-joined detail like issue/PR titles or dates, query
-`data/db.sqlite` directly with the `issue_id` and `pr_id` values
-the CSV gives you.
+`heuristic_close_time` edges (the 5-minute-window heuristic).
+`pr_merged_at` is the closing PR's merge timestamp, so the same
+file can be re-windowed without re-running the module (e.g.,
+`awk -F, '$6 >= "2026-04-01"' ...`).
+`issue_number` and `pr_number` are the GitHub-visible numbers (so a
+row can be looked up directly on the GitHub UI); `issue_id` and
+`pr_id` are the analysis database's primary keys.
 
 `speed` produces four speed-and-cadence metrics (issue-to-first-
 linked-PR latency, PR-open-to-merge, post-cutoff fast-close, and
@@ -229,96 +329,6 @@ The `data` mount is writable because SQLite may need to access
 WAL/shm sidecar files even when the database itself is opened
 read-only; the analysis code uses a read-only connection internally
 and will not modify the database.
-
-## Running the classifier
-
-The classifier walks every subject repo's issues, PRs, commits,
-comments, and reviews, applies a shared rule list (see
-`src/classifier/rules.py`), and writes verdicts to the
-`producer_classification` table. Required before analyses that join
-to that table; the existing analysis modules also import from
-`src/classifier/rules` directly during plotting -- `first_look`,
-`drilldown`, and `commit_authorship` use it for the coarse
-credential class, while `authorship`, `speed`, and
-`resolution_quality` use the full producer taxonomy. Equivalent to
-joining to `producer_classification` because the rule list is the
-same; a query that wanted verdicts at classifier-version granularity
-would need to read the table.
-
-This is a write operation on the database, so the data mount is RW
-and we use the same UID-mapping pattern as the extractors:
-
-    docker run --rm \
-      --user "$(id -u):$(id -g)" \
-      -v "$(pwd):/config:ro" \
-      -v "$(pwd)/data:/data" \
-      console-analysis \
-      -m src.classifier --config /config/config.yaml --verbose
-
-Re-running with the same `CLASSIFIER_VERSION` (defined at the top of
-`src/classifier/main.py`) replaces existing rows for that version.
-Re-running with a new version adds rows alongside; old verdicts are
-preserved so versions can be compared.
-
-### Inspecting the classifier output
-
-The classifier writes one row per `(target_kind, target_id, source,
-classifier_version)` tuple to the
-[`producer_classification`](SCHEMA.md#producer_classification) table.
-A few example queries (run on the host with `sqlite3 data/db.sqlite`;
-substitute `'v2'` with whatever version the classifier last ran with):
-
-Producer breakdown across all artifact kinds:
-
-    SELECT producer, COUNT(*) n
-    FROM producer_classification
-    WHERE classifier_version = 'v2'
-    GROUP BY producer
-    ORDER BY n DESC;
-
-Producer breakdown for one kind:
-
-    SELECT producer, COUNT(*) n
-    FROM producer_classification
-    WHERE classifier_version = 'v2' AND target_kind = 'pr'
-    GROUP BY producer
-    ORDER BY n DESC;
-
-Sub-producer detail within `other-bot-app`:
-
-    SELECT sub_producer, COUNT(*) n
-    FROM producer_classification
-    WHERE classifier_version = 'v2' AND producer = 'other-bot-app'
-    GROUP BY sub_producer
-    ORDER BY n DESC;
-
-Compare two classifier versions on the same artifact:
-
-    SELECT v1.producer AS v1_producer, v2.producer AS v2_producer, COUNT(*) n
-    FROM producer_classification v1
-    JOIN producer_classification v2
-      ON v1.target_kind = v2.target_kind
-     AND v1.target_id = v2.target_id
-     AND v1.source = v2.source
-    WHERE v1.classifier_version = 'v1' AND v2.classifier_version = 'v2'
-    GROUP BY v1.producer, v2.producer
-    ORDER BY n DESC;
-
-Join classification back to the source artifact (PRs example):
-
-    SELECT i.number, i.title, pc.producer, pc.sub_producer
-    FROM issue i
-    JOIN producer_classification pc
-      ON pc.target_kind = 'pr' AND pc.target_id = i.issue_id
-    WHERE i.is_pr = 1
-      AND pc.classifier_version = 'v2'
-      AND pc.producer = 'hive-merger'
-    LIMIT 20;
-
-The other artifact kinds use `target_kind = 'issue'`, `'commit'`,
-`'comment'`, or `'review'` and join to the corresponding source
-table (see [`SCHEMA.md`](SCHEMA.md) for which key field each
-`target_id` references).
 
 ## Recovering from a halted run
 

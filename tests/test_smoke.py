@@ -23,7 +23,10 @@ def test_imports():
         comments, issues, labels, pr_files, reactions, reviews, runs, timelines,
     )
     from src.extractor_git import git_cli, walker  # noqa: F401
-    from src.analysis import first_look, drilldown, commit_authorship  # noqa: F401
+    from src.analysis import (  # noqa: F401
+        first_look, drilldown, commit_authorship,
+        authorship, speed, resolution_quality,
+    )
     from src.analysis import _plotly_html  # noqa: F401
     from src.classifier import adapters, main, record, rules  # noqa: F401
 
@@ -315,7 +318,7 @@ def test_classifier_rules_cover_known_cases():
     from src.classifier.record import Record
     from src.classifier.rules import (
         CREDENTIAL_BOT, CREDENTIAL_HUMAN, CREDENTIAL_UNKNOWN,
-        PRODUCER_HIVE_MERGER, PRODUCER_HIVE_SCANNER, PRODUCER_COPILOT,
+        PRODUCER_HIVE_BOT, PRODUCER_HIVE_SCANNER, PRODUCER_COPILOT,
         PRODUCER_HUMAN, PRODUCER_OTHER_BOT_APP, PRODUCER_PROJECT_BOT,
         PRODUCER_UNKNOWN,
         classify, credential_class_of,
@@ -334,7 +337,7 @@ def test_classifier_rules_cover_known_cases():
         PRODUCER_PROW,
     )
     # Known logins
-    assert _classify(login="kubestellar-hive[bot]") == PRODUCER_HIVE_MERGER
+    assert _classify(login="kubestellar-hive[bot]") == PRODUCER_HIVE_BOT
     assert _classify(login="copilot[bot]") == PRODUCER_COPILOT
     assert _classify(login="copilot-swe-agent[bot]") == PRODUCER_COPILOT
     assert _classify(login="copilot-pull-request-reviewer[bot]") == PRODUCER_COPILOT

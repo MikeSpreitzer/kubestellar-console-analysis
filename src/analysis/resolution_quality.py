@@ -73,7 +73,7 @@ PRODUCER_DISPLAY_ORDER = (
     "claude-app",
     "hive-scanner",
     "hive-reviewer",
-    "hive-merger",
+    "hive-bot",
     "prow",
     "project-bot",
     "netlify",

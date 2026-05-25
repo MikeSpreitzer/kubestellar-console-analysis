@@ -43,7 +43,12 @@ log = logging.getLogger(__name__)
 #         claude-app; add copilot-swe-agent[bot] under copilot; add
 #         kubestellar-console-bot[bot] under project-bot. github-actions
 #         remains in other-bot-app pending content-based splitting.
-CLASSIFIER_VERSION = "v2"
+#   v3 -- rename hive-merger -> hive-bot. The earlier name conflated
+#         the kubestellar-hive[bot] identity with one of its roles
+#         (PR merger), but the same identity also opens issues, opens
+#         PRs, and authors comments; the classifier only sees the
+#         actor identity, so the label is now identity-only.
+CLASSIFIER_VERSION = "v3"
 
 # Source value written to producer_classification. The schema reserves
 # 'journal' and 'workflow_run' for future enrichment from those data
