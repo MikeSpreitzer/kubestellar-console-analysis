@@ -82,11 +82,27 @@ class ClientStats:
 
 @dataclass
 class GitHubClient:
+    # Note: we deliberately do *not* send an ``X-GitHub-Api-Version``
+    # header. Pinning the API version interacts badly with preview
+    # ``Accept`` headers like
+    # ``application/vnd.github.mockingbird-preview+json`` (used by the
+    # timeline extractor to surface ``cross-referenced`` events): when
+    # both headers are present GitHub honors the API-version pin and
+    # silently drops preview-only fields from the response. We hit
+    # exactly that bug -- 14k+ ``referenced`` events stored, zero
+    # ``cross-referenced`` events stored, even though the ``gh`` CLI
+    # (which does not pin a version) sees them on the same endpoint.
+    # The 2022-11-28 version is currently the REST API default, so
+    # omitting the pin is effectively a no-op for non-preview calls.
+    # The risk is that GitHub eventually advances the default and our
+    # behavior shifts; that's preferable to the silent dropping the
+    # pin caused. If a future call needs a specific version, send it
+    # per-request via ``request(..., headers=...)`` rather than as a
+    # session-wide default.
     token: str
     user_agent: str = DEFAULT_USER_AGENT
     base_url: str = GITHUB_API
     accept: str = "application/vnd.github+json"
-    api_version: str = "2022-11-28"
     session: requests.Session = field(default_factory=requests.Session)
     stats: ClientStats = field(default_factory=ClientStats)
 
@@ -95,7 +111,6 @@ class GitHubClient:
             {
                 "Authorization": f"Bearer {self.token}",
                 "Accept": self.accept,
-                "X-GitHub-Api-Version": self.api_version,
                 "User-Agent": self.user_agent,
             }
         )

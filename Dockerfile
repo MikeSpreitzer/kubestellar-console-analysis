@@ -31,6 +31,7 @@ COPY tests /app/tests
 # One-off diagnostics living at the repo root. Kept out of src/ and
 # tests/ because they aren't part of the pipeline and aren't tests.
 COPY diagnose_authorship_heuristic.py /app/diagnose_authorship_heuristic.py
+COPY diagnose_cross_referenced.py /app/diagnose_cross_referenced.py
 
 # Expected runtime layout (provided by bind mounts at `docker run`):
 #   /app/src         -- source code (in image)
