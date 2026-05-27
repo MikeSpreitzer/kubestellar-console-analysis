@@ -131,7 +131,6 @@ def bot_issue_producers(
             ),
         ))
     fig.update_layout(
-        title="Bot-opened issues per day, by author login",
         xaxis_title="date (UTC)",
         yaxis_title="count per day",
         hovermode="x unified",
@@ -139,6 +138,7 @@ def bot_issue_producers(
     )
     write_html_with_title(
         fig, html_path, f"Bot issue producers ({repo_name})",
+        page_heading="Bot-opened issues per day, by author login",
     )
     log.info("wrote %s", html_path)
 

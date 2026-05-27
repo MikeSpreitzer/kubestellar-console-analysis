@@ -265,13 +265,12 @@ def _plot_stacked(
             ),
         ))
     fig.update_layout(
-        title=title,
         xaxis_title="date (UTC)",
         yaxis_title="count per day",
         hovermode="x unified",
         template="plotly_white",
     )
-    write_html_with_title(fig, out_path_html, tab_title)
+    write_html_with_title(fig, out_path_html, tab_title, page_heading=title)
     log.info("wrote %s", out_path_html)
 
 
@@ -532,7 +531,6 @@ def bot_email_producers(
             ),
         ))
     fig.update_layout(
-        title="Bot-authored commits per day, by producer (login or email)",
         xaxis_title="date (UTC)",
         yaxis_title="count per day",
         hovermode="x unified",
@@ -540,6 +538,7 @@ def bot_email_producers(
     )
     write_html_with_title(
         fig, html_path, f"Bot commit producers ({repo_name})",
+        page_heading="Bot-authored commits per day, by producer (login or email)",
     )
     log.info("wrote %s", html_path)
 

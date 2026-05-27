@@ -306,9 +306,13 @@ for the fast-close count metric:
   - `speed_fast_close` — weekly count of issues closed within
     `--fast-close-threshold-minutes` minutes of being opened,
     stacked by closer producer.
-  - `speed_mttr_{cumulative_open,final_close}_{median,mean}` — four
-    charts (two methodologies × two statistics), each a weekly
-    line per closer producer.
+  - `speed_mttr_{first_close,cumulative_open,final_close}_{median,mean}_{pr,no_pr}`
+    — twelve charts (three methodologies × two statistics × two
+    closure paths: issues closed by a linked merged PR vs. issues
+    closed without one). Each is a weekly line per closer producer.
+    The per-issue CSV `speed_mttr_per_issue.csv` carries all three
+    methodology values plus `reopen_count` and `closed_by_pr` for
+    follow-up analysis.
 
 ```
     docker run --rm \

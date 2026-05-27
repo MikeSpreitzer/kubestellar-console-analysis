@@ -251,9 +251,11 @@ The analysis layer currently exposes six entry points:
   plus a 5-minute close-time heuristic.
 - ``src.analysis.speed`` -- speed and cadence metrics as weekly
   time series (issue-to-first-linked-PR latency,
-  PR-open-to-merge, fast-close count, MTTR with cumulative-open
-  and final-close methodologies × median/mean). Era boundaries
-  annotated on every plot. Uses the full producer taxonomy.
+  PR-open-to-merge, fast-close count, MTTR with three
+  methodologies × median/mean × two closure paths --
+  issue-closed-by-PR vs. issue-closed-without-PR -- for 12 MTTR
+  charts). Era boundaries annotated on every plot. Uses the full
+  producer taxonomy.
 - ``src.analysis.resolution_quality`` -- the two-regime
   resolution-quality signals as weekly time series
   (high-precision/low-recall: reopen-by-original-reporter,
@@ -437,14 +439,19 @@ issues are included rather than dropped).
    ``--fast-close-threshold-minutes`` minutes (default 5) of being
    opened, stacked by closer producer. Replaces the previous
    post-cutoff histogram.
-4. **MTTR** -- four separate charts: ``cumulative_open`` and
-   ``final_close`` methodologies, each with weekly median and
-   weekly mean (so four total). Each is per-week per-closer-producer
-   as a line chart on a log y-axis. The previous ``first_close``
-   methodology has been dropped. Cumulative-open is the sum of
-   ``(open -> close)`` intervals across the issue's life; final-close
-   is ``created_at -> last observed close``. Reopen counts are
-   recorded per issue in the per-issue CSV but not plotted directly.
+4. **MTTR** -- twelve separate charts: three methodologies
+   (``first_close``, ``cumulative_open``, ``final_close``) × two
+   statistics (median, mean) × two closure paths
+   (``_pr`` for issues closed by a linked merged PR; ``_no_pr`` for
+   issues closed without one). Each is per-week per-closer-producer
+   as a line chart on a log y-axis. ``first_close`` is
+   ``created_at -> first observed close``; ``cumulative_open`` is the
+   sum of ``(open -> close)`` intervals across the issue's life,
+   excluding closed-then-reopened gaps; ``final_close`` is
+   ``created_at -> last observed close``. Reopen counts and the
+   ``closed_by_pr`` flag are recorded per issue in the per-issue CSV
+   so a reader can compute methodology gaps (DESIGN.md flags the
+   cumulative-vs-final gap as informative) or filter populations.
 
 **``resolution_quality``: triangulation signals across two precision
 regimes, weekly time series.** Per the "Resolution-quality signals"
@@ -728,27 +735,28 @@ is good. A high-throughput system can be shipping bad work quickly.
 - Issues closed within N minutes of opening (right-tail of fast closes)
 - **Mean Time To Resolution** of issues, broken out by closer
   producer. Methodologies diverge in the presence of reopens, so
-  multiple are reported. As implemented in ``speed.py``, two
-  methodologies are produced (the first-close-interval methodology
-  has been dropped; below is preserved as design context):
+  all three are reported:
 
-  * *first-close interval* (not produced): open → first close.
-    Smallest of the three. Treats the issue as resolved at the first
-    close even if it was later reopened. Most "MTTR" tools use this
-    by default; we judged it less informative than the two below
-    given how often hive's pipeline closes-then-reopens.
+  * *first-close interval*: open → first close. Smallest of the three.
+    Treats the issue as resolved at the first close even if it was
+    later reopened. Most "MTTR" tools use this by default.
   * *cumulative-open time*: sum of all (open → close) intervals
     across the issue's life. Excludes the closed-and-then-reopened
     gaps where nobody was working on it. Best matches "how long was
     this an active concern."
   * *final-close interval*: open → final close. Wall-clock from
     initial report until things stabilized, including any
-    abandoned-then-resumed periods. Largest of the two.
+    abandoned-then-resumed periods. Largest of the three.
 
-  Plotted as four weekly time-series charts: each methodology with
-  both median and mean (so cumulative-open-median, cumulative-open-
-  mean, final-close-median, final-close-mean). The reopen count is
-  recorded per-issue in the CSV but not plotted directly.
+  Each methodology is plotted as a weekly time series at both median
+  and mean, and each (methodology, statistic) pair is split by
+  closure path (issue closed by a linked merged PR vs. closed
+  without one). That yields 3 × 2 × 2 = 12 charts. Filenames look
+  like ``speed_mttr_first_close_median_pr.{png,html,csv}`` and
+  ``..._no_pr.{...}``. Reopen counts and the per-issue values for
+  all three methodologies are written to ``speed_mttr_per_issue.csv``
+  so a reader can compute methodology gaps (e.g., cumulative-open
+  vs. final-close) or filter populations.
 
 ### Behavior and churn (descriptive, not evaluative)
 

@@ -41,26 +41,32 @@ Metrics produced (all per subject repo, all weekly):
   produce the count for any threshold; this replaces the previous
   cumulative threshold table at fixed multiples.
 
-- ``speed_mttr_*``: four separate charts, all stacked by closer
-  producer. Each is per-week per-producer. The ``cumulative_open``
-  methodology is the sum of ``(open -> close)`` intervals across the
-  issue's life (excludes any closed-then-reopened gap); the
-  ``final_close`` methodology is ``created_at -> last observed close``.
-  The previous ``first_close`` methodology has been dropped per the
-  conversation that produced this rewrite.
+- ``speed_mttr_*``: twelve charts (3 methodologies x 2 statistics x
+  2 closure paths). All per-week per-producer. The methodologies:
 
-  * ``speed_mttr_cumulative_open_median``
-  * ``speed_mttr_cumulative_open_mean``
-  * ``speed_mttr_final_close_median``
-  * ``speed_mttr_final_close_mean``
+  * ``first_close``: ``created_at -> first observed close``. Smallest
+    of the three; treats the issue as resolved at the first close
+    even if it was later reopened. Most "MTTR" tools use this.
+  * ``cumulative_open``: sum of ``(open -> close)`` intervals across
+    the issue's life. Excludes any closed-and-then-reopened gap.
+    Best matches "how long was this an active concern".
+  * ``final_close``: ``created_at -> last observed close``. Wall-clock
+    from initial report until things stabilized.
 
-  DESIGN.md recommends paying attention to the gap between
-  cumulative-open and final-close (an indicator of reopen-driven
-  abandonment). That gap is not plotted directly; both methodologies
-  appear side by side in their own charts, and the per-issue CSV
-  ``speed_mttr_per_issue.csv`` carries both columns plus
-  ``reopen_count`` so a reader can compute the gap and the
-  reopen-frequency signal directly.
+  Each is plotted twice: once as the median of the per-issue values,
+  once as the mean. And each (methodology, statistic) pair is split
+  by closure path: ``_pr`` for issues closed by a linked merged PR,
+  ``_no_pr`` for issues closed without one. So filenames look like:
+
+  * ``speed_mttr_first_close_median_pr``
+  * ``speed_mttr_first_close_median_no_pr``
+  * ... (and similarly for the other 5 methodology+stat combos)
+
+  The per-issue CSV ``speed_mttr_per_issue.csv`` carries all three
+  per-issue values, ``reopen_count``, ``closer_producer``, and the
+  ``closed_by_pr`` flag, so a reader can compute the gap between any
+  two methodologies (DESIGN.md flags cumulative-vs-final as
+  particularly informative) or filter to specific populations.
 
 Run as ``python -m src.analysis.speed --config /config/config.yaml``.
 """
@@ -215,7 +221,6 @@ def _weekly_stacked_bars(
             hovertemplate="%{x|%Y-%m-%d}<br>" + p + ": %{y}<extra></extra>",
         ))
     pfig.update_layout(
-        title=title,
         xaxis_title="week",
         yaxis_title=y_label,
         barmode="stack",
@@ -225,7 +230,7 @@ def _weekly_stacked_bars(
         annotate_plotly(
             pfig, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
         )
-    write_html_with_title(pfig, out_html, tab_title)
+    write_html_with_title(pfig, out_html, tab_title, page_heading=title)
     log.info("wrote %s", out_html)
 
 
@@ -292,7 +297,7 @@ def _weekly_per_producer_lines(
                            "<extra></extra>"),
         ))
     pfig.update_layout(
-        title=title, xaxis_title="week", yaxis_title=y_label,
+        xaxis_title="week", yaxis_title=y_label,
         template="plotly_white",
         yaxis_type="log" if log_y else "linear",
     )
@@ -300,7 +305,7 @@ def _weekly_per_producer_lines(
         annotate_plotly(
             pfig, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
         )
-    write_html_with_title(pfig, out_html, tab_title)
+    write_html_with_title(pfig, out_html, tab_title, page_heading=title)
     log.info("wrote %s", out_html)
 
 
@@ -491,16 +496,26 @@ def _mttr_data(
     *,
     closing_merged_at: dict[int, str],
 ) -> pd.DataFrame:
-    """Per-issue MTTR methodologies (cumulative_open and final_close;
-    first_close is not produced in this rewrite).
+    """Per-issue MTTR: three methodologies (first_close, final_close,
+    cumulative_open) plus a closure-path flag.
 
     For each closed issue, we collect:
       - created_at
-      - final_close: latest 'closed' event, or closed_at if no events
-      - cumulative_open_minutes: sum of (open->close) intervals over
-        the issue's history
+      - first_close_minutes: created_at -> first observed 'closed' event
+        (or closed_at if no events). Smallest of the three; treats
+        the issue as resolved at the first close even if it was later
+        reopened.
+      - final_close_minutes: created_at -> last observed 'closed' event
+        (or closed_at if no events). Wall-clock from initial report
+        until things stabilized.
+      - cumulative_open_minutes: sum of (open->close) intervals across
+        the issue's life. Excludes the closed-and-then-reopened gap
+        where nobody was working on it.
       - reopen_count: number of 'reopened' events
       - closer_producer: last closer (matches issue.closed_by_id)
+      - closed_by_pr: True iff the issue had a linked merged PR (i.e.
+        closing_merged_at has a value); False otherwise. Used to split
+        the MTTR plots by closure path.
       - bin_ts: closing PR's merged_at if linked, else closed_at
 
     ``closing_merged_at`` is an issue_id -> ISO-string dict supplied by
@@ -588,8 +603,10 @@ def _mttr_data(
         if not ev_list:
             cum_seconds = (iss["closed_at_dt"] - iss["created_at_dt"]).total_seconds()
 
+        first_close = closes[0] if closes else iss["closed_at_dt"]
         out_rows.append({
             "issue_id":     iss["issue_id"],
+            "first_close_minutes": (first_close - iss["created_at_dt"]).total_seconds() / 60.0,
             "final_close_minutes": (final_close - iss["created_at_dt"]).total_seconds() / 60.0,
             "cumulative_open_minutes": cum_seconds / 60.0,
             "reopen_count": len(reopens),
@@ -609,6 +626,10 @@ def _mttr_data(
     df["bin_ts"] = bin_ts_from_pr.fillna(
         df["issue_id"].map(closed_at_by_issue),
     )
+    # closed_by_pr: True iff a linked merged PR exists for this issue.
+    # Same predicate the bin_ts fallback uses (bin_ts_from_pr is
+    # non-NaT iff closing_merged_at had a value for the issue_id).
+    df["closed_by_pr"] = bin_ts_from_pr.notna().values
     return df
 
 
@@ -771,29 +792,60 @@ def run_for_repo(
             y_label="issues closed within threshold",
         )
 
-    # --- MTTR: four charts (cumulative_open|final_close x median|mean) ---
+    # --- MTTR: 3 methodologies x 2 statistics x 2 closure paths = 12 charts.
+    # The closure-path split (issue closed by a linked merged PR vs.
+    # closed without one) is reported as separate output files so each
+    # chart stays uncluttered.
     df_mttr = _mttr_data(conn, repo_id, closing_merged_at=closing_merged_at)
     if not df_mttr.empty:
         df_mttr.to_csv(csvs / "speed_mttr_per_issue.csv", index=False)
-        for value_col, slug, label in [
+        n_pr = int(df_mttr["closed_by_pr"].sum())
+        n_no_pr = int((~df_mttr["closed_by_pr"]).sum())
+        log.info(
+            "[%s/%s] MTTR population: %d closed by PR, %d closed without PR",
+            owner, name, n_pr, n_no_pr,
+        )
+        methodologies = [
+            ("first_close_minutes",     "first_close",     "first-close"),
             ("cumulative_open_minutes", "cumulative_open", "cumulative-open"),
             ("final_close_minutes",     "final_close",     "final-close"),
-        ]:
+        ]
+        closure_paths = [
+            (True,  "pr",    "issue closed by PR"),
+            (False, "no_pr", "issue closed without PR"),
+        ]
+        for value_col, m_slug, m_label in methodologies:
             for stat in ("median", "mean"):
-                wk = _weekly_stat_by_producer(
-                    df_mttr, producer_col="closer_producer",
-                    value_col=value_col, stat=stat,
-                )
-                wk.to_csv(csvs / f"speed_mttr_{slug}_{stat}.csv")
-                _weekly_per_producer_lines(
-                    wk,
-                    title=(f"MTTR ({label}, weekly {stat}) "
-                           f"by closer producer ({owner}/{name})"),
-                    out_png=plots / f"speed_mttr_{slug}_{stat}.png",
-                    out_html=htmls / f"speed_mttr_{slug}_{stat}.html",
-                    tab_title=f"{name}: MTTR {label} {stat} (weekly)",
-                    y_label=f"{stat} minutes (log)",
-                )
+                for path_flag, p_slug, p_label in closure_paths:
+                    sub = df_mttr[df_mttr["closed_by_pr"] == path_flag]
+                    if sub.empty:
+                        log.info(
+                            "[%s/%s] no %s issues for MTTR %s %s",
+                            owner, name, p_label, m_label, stat,
+                        )
+                        continue
+                    wk = _weekly_stat_by_producer(
+                        sub, producer_col="closer_producer",
+                        value_col=value_col, stat=stat,
+                    )
+                    wk.to_csv(
+                        csvs / f"speed_mttr_{m_slug}_{stat}_{p_slug}.csv"
+                    )
+                    _weekly_per_producer_lines(
+                        wk,
+                        title=(
+                            f"MTTR ({m_label}, weekly {stat}, "
+                            f"{p_label}) by closer producer "
+                            f"({owner}/{name})"
+                        ),
+                        out_png=plots / f"speed_mttr_{m_slug}_{stat}_{p_slug}.png",
+                        out_html=htmls / f"speed_mttr_{m_slug}_{stat}_{p_slug}.html",
+                        tab_title=(
+                            f"{name}: MTTR {m_label} {stat} "
+                            f"({p_label}) (weekly)"
+                        ),
+                        y_label=f"{stat} minutes (log)",
+                    )
 
 
 def main(argv: list[str] | None = None) -> int:

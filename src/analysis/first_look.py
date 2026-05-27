@@ -174,13 +174,12 @@ def _plot_stacked(
             ),
         ))
     plotly_fig.update_layout(
-        title=title,
         xaxis_title="date (UTC)",
         yaxis_title="count per day",
         hovermode="x unified",
         template="plotly_white",
     )
-    write_html_with_title(plotly_fig, out_path_html, tab_title)
+    write_html_with_title(plotly_fig, out_path_html, tab_title, page_heading=title)
     log.info("wrote %s", out_path_html)
 
 

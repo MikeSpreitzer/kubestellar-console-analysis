@@ -322,7 +322,6 @@ def _weekly_stacked_bars_with_caveats(
             hovertemplate="%{x|%Y-%m-%d}<br>" + p + ": %{y}<extra></extra>",
         ))
     pfig.update_layout(
-        title=title,
         xaxis_title="week",
         yaxis_title=y_label,
         barmode="stack",
@@ -332,7 +331,7 @@ def _weekly_stacked_bars_with_caveats(
         annotate_plotly(
             pfig, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
         )
-    write_html_with_title(pfig, out_html, tab_title)
+    write_html_with_title(pfig, out_html, tab_title, page_heading=title)
     log.info("wrote %s", out_html)
 
 

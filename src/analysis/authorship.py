@@ -408,12 +408,11 @@ def _plot_heatmap(
         ),
     ))
     pfig.update_layout(
-        title=title,
         xaxis_title="PR author producer",
         yaxis_title="issue author producer",
         template="plotly_white",
     )
-    write_html_with_title(pfig, out_html, tab_title)
+    write_html_with_title(pfig, out_html, tab_title, page_heading=title)
     log.info("wrote %s", out_html)
 
 
