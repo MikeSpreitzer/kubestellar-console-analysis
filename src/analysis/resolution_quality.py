@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
-"""Resolution-quality signals.
+"""Resolution-quality signals, weekly time series.
 
 DESIGN.md splits these into two regimes:
 
@@ -17,21 +17,34 @@ High-precision / low-recall (cleaner signal, sparse data)
 
 Low-precision / higher-recall (more data, more noise)
   - ``post_close_phrase_matches``: comments authored after an issue's
-    ``closed_at`` containing dissatisfaction phrases (stronger and
-    weaker tiers; see PHRASE_TIERS below). Reported per closer producer
-    and per author of the post-close comment.
-  - ``cross_reference_patterns``: ``cross-referenced`` events landing on
-    a closed issue, separated by direction (the closed issue being
-    referenced from a later issue/PR vs. the closed issue referencing
-    others). High counts on the inbound side after close suggest the
-    bug recurred or the discussion continues elsewhere.
+    ``closed_at`` containing dissatisfaction phrases (``explicit`` and
+    ``general`` tiers; see PHRASE_TIERS below). The tier names
+    describe what each list contains rather than a precision ordering
+    -- in practice the lists overlap less than a "stronger / weaker"
+    framing would imply, and the ``explicit`` list previously included
+    ``regression``, which fired overwhelmingly on engineering
+    vocabulary ("regression test", "regression introduced") rather
+    than dissatisfaction; that phrase has been removed.
+  - ``cross_reference_patterns``: ``cross-referenced`` events landing
+    on a closed issue. The per-event CSV preserves the close-relative
+    timing label (``before_close`` / ``after_close`` / ``never_closed``)
+    so a reader can subset by direction; the weekly time-series plot
+    is a count stacked by closer producer.
+
+Per DESIGN.md's era-awareness section the corpus is non-stationary on
+a timescale of weeks (six ACMM-paper layer transitions in five months),
+so all outputs are weekly time series rather than aggregates over the
+full window. Era-boundary annotations are drawn on every plot. Each
+event/match is binned by the timestamp of the **signal trigger**:
+``reopened_at`` for reopens, follow-up issue's ``created_at`` for
+follow-ups, comment ``commented_at`` for phrase matches, ``xref_at``
+for cross-references.
 
 Each output CSV is annotated by file with a header comment naming the
 DESIGN.md caveats that bound interpretation: silent drops, bidirectional
 adoption lag, attention non-uniformity, multi-case bundling.
 
-All metrics use full project history; there is no fast-close-style
-cutoff here. Run as
+Run as
 ``python -m src.analysis.resolution_quality --config /config/config.yaml``.
 """
 
@@ -61,6 +74,7 @@ from ..classifier.rules import (
 )
 from ..common.config import load_config
 from ..common.db import connect_readonly
+from ..common.eras import annotate_matplotlib, annotate_plotly, to_week
 from ._plotly_html import write_html_with_title
 
 
@@ -91,13 +105,35 @@ ISSUE_REF_RE = re.compile(
 )
 
 
-# Two tiers of dissatisfaction phrases. The stronger tier is intended
-# to be near-unambiguous; the weaker tier admits more false positives
-# but catches reformulations the stronger tier misses. Matching is
-# case-insensitive on substring; the comment author's intent is not
-# verified.
+# Two tiers of dissatisfaction phrases. The naming is descriptive of
+# what each list contains, not a precision/recall ordering -- early
+# experience showed the lists overlap less than the names "stronger"
+# and "weaker" suggested, and the original "stronger" list was
+# dominated by ``regression`` matching engineering vocabulary
+# ("added a regression test", "no regression observed") rather than
+# reporter dissatisfaction. So:
+#
+# - ``explicit`` -- phrases that, when they appear in a post-close
+#   comment, plausibly indicate the close did not satisfy the
+#   commenter (e.g., "still broken", "didn't fix", "please reopen").
+#   ``regression`` was removed from this list because in this corpus
+#   it is overwhelmingly used in its engineering-vocabulary sense
+#   ("regression test", "regression introduced") rather than as
+#   dissatisfaction; on the first run, 749 of 755 ``explicit``-tier
+#   hits were ``regression`` matches that were nearly all false
+#   positives. ``reopen`` is left in the list pending similar
+#   review; it has lower volume and is more often actually about
+#   reopening.
+# - ``general`` -- short, generic complaint phrasings (e.g.,
+#   "broken", "doesn't work", "again"). These fire on many
+#   contexts that aren't dissatisfaction with this close, so
+#   precision is low; included as a coarse volume signal rather
+#   than as a definitive indicator.
+#
+# Matching is case-insensitive on substring; the comment author's
+# intent is not verified.
 PHRASE_TIERS: dict[str, list[str]] = {
-    "stronger": [
+    "explicit": [
         "still broken",
         "still happens",
         "still happening",
@@ -110,14 +146,13 @@ PHRASE_TIERS: dict[str, list[str]] = {
         "doesn't fix",
         "does not fix",
         "not actually fixed",
-        "regression",
         "this broke again",
         "broken again",
         "reopen",
         "should be reopened",
         "please reopen",
     ],
-    "weaker": [
+    "general": [
         "doesn't work",
         "does not work",
         "not working",
@@ -185,50 +220,118 @@ def _write_csv_with_caveats(df: pd.DataFrame, path: Path) -> None:
     log.info("wrote %s (%d rows)", path, len(df))
 
 
-def _producer_count_bar(
-    counts: pd.Series,
+# to_week lives in src/common/eras.py and is imported above.
+# A local _to_week alias keeps the call sites tidy.
+_to_week = to_week
+
+
+def _weekly_counts_by_producer(
+    df: pd.DataFrame, *, trigger_col: str, producer_col: str,
+) -> pd.DataFrame:
+    """Wide DataFrame indexed by week with one column per producer
+    holding counts of rows in that (week, producer) cell."""
+    if df.empty:
+        return pd.DataFrame()
+    work = df.copy()
+    work["_trigger_dt"] = pd.to_datetime(
+        work[trigger_col], utc=True, errors="coerce",
+    )
+    work = work.dropna(subset=["_trigger_dt"])
+    if work.empty:
+        return pd.DataFrame()
+    weeks = _to_week(work["_trigger_dt"])
+    counts = (
+        pd.DataFrame({"week": weeks, "producer": work[producer_col]})
+          .groupby(["week", "producer"]).size()
+          .unstack(fill_value=0)
+          .sort_index()
+    )
+    return counts
+
+
+def _weekly_stacked_bars_with_caveats(
+    counts: pd.DataFrame,
+    *,
     title: str,
     out_png: Path,
     out_html: Path,
+    out_csv: Path,
     tab_title: str,
     y_label: str,
 ) -> None:
-    """Bar chart of counts indexed by producer."""
+    """Plot a weekly stacked-bar chart and write the wide counts as a
+    CSV with the standard caveat header.
+
+    ``counts`` must be indexed by tz-aware weekly timestamps with one
+    column per producer.
+    """
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
     if counts.empty:
-        log.warning("no data for %s", title)
+        # Still write a header-only caveat CSV so downstream tooling
+        # that opens this path unconditionally gets a valid (empty)
+        # file rather than FileNotFoundError. Skip the plots since
+        # there's nothing to draw.
+        with out_csv.open("w") as f:
+            f.write(CAVEAT_HEADER)
+        log.warning("no data for %s; wrote empty %s", title, out_csv)
         return
 
     out_png.parent.mkdir(parents=True, exist_ok=True)
     out_html.parent.mkdir(parents=True, exist_ok=True)
 
-    producers = _ordered_producers(list(counts.index))
-    counts = counts.reindex(producers, fill_value=0)
+    producers = _ordered_producers(list(counts.columns))
+    counts = counts.reindex(columns=producers, fill_value=0)
 
-    fig, ax = plt.subplots(figsize=(max(7, len(producers) * 0.7 + 2), 5))
-    ax.bar(producers, counts.values, color="steelblue")
-    ax.set_xticks(range(len(producers)))
-    ax.set_xticklabels(producers, rotation=45, ha="right")
+    with out_csv.open("w") as f:
+        f.write(CAVEAT_HEADER)
+        counts.to_csv(f)
+    log.info("wrote %s (%d weeks)", out_csv, len(counts))
+
+    weeks = counts.index
+    weeks_native = weeks.to_pydatetime()
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    bottoms = np.zeros(len(weeks))
+    width = 6.0
+    for p in producers:
+        vals = counts[p].values.astype(float)
+        ax.bar(weeks_native, vals, width=width, bottom=bottoms,
+               align="edge", label=p)
+        bottoms = bottoms + vals
+    ax.set_xlabel("week")
     ax.set_ylabel(y_label)
     ax.set_title(title)
-    for i, v in enumerate(counts.values):
-        if v > 0:
-            ax.text(i, v, str(int(v)), ha="center", va="bottom", fontsize=8)
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3, axis="y")
+    if len(weeks) > 0:
+        annotate_matplotlib(
+            ax, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
+        )
+    fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
     log.info("wrote %s", out_png)
 
-    pfig = go.Figure(data=go.Bar(
-        x=producers,
-        y=counts.values.tolist(),
-        hovertemplate="%{x}: %{y}<extra></extra>",
-    ))
+    pfig = go.Figure()
+    for p in producers:
+        pfig.add_trace(go.Bar(
+            x=list(weeks),
+            y=counts[p].values.tolist(),
+            name=p,
+            hovertemplate="%{x|%Y-%m-%d}<br>" + p + ": %{y}<extra></extra>",
+        ))
     pfig.update_layout(
         title=title,
-        xaxis_title="producer",
+        xaxis_title="week",
         yaxis_title=y_label,
+        barmode="stack",
         template="plotly_white",
     )
+    if len(weeks) > 0:
+        annotate_plotly(
+            pfig, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
+        )
     write_html_with_title(pfig, out_html, tab_title)
     log.info("wrote %s", out_html)
 
@@ -586,6 +689,8 @@ def run_for_repo(
     csvs  = output_dir / "csv"  / safe_slug
 
     # ---- Metric 1: reopen by original reporter ----
+    # Trigger: the reopen event itself. Stack by closer producer (the
+    # producer whose close prompted the reopen).
     reopens = _reopen_by_original_reporter(conn, repo_id)
     if reopens.empty:
         log.info("[%s/%s] no self-reopens", owner, name)
@@ -599,23 +704,24 @@ def run_for_repo(
             ]].sort_values("reopened_at"),
             edges_path,
         )
-        by_closer = (
-            reopens.groupby("closer_producer").size().rename("self_reopens")
+        counts = _weekly_counts_by_producer(
+            reopens, trigger_col="reopened_at",
+            producer_col="closer_producer",
         )
-        summary_path = csvs / "rq_reopen_by_original_reporter_by_closer.csv"
-        _write_csv_with_caveats(
-            by_closer.reset_index(), summary_path,
-        )
-        _producer_count_bar(
-            by_closer,
-            title=f"Self-reopens by closer producer ({owner}/{name})",
+        _weekly_stacked_bars_with_caveats(
+            counts,
+            title=(f"Self-reopens, weekly count by closer producer "
+                   f"({owner}/{name})"),
             out_png=plots / "rq_reopen_by_original_reporter.png",
             out_html=htmls / "rq_reopen_by_original_reporter.html",
-            tab_title=f"{name}: self-reopens by closer",
+            out_csv=csvs / "rq_reopen_by_original_reporter.csv",
+            tab_title=f"{name}: self-reopens (weekly)",
             y_label="self-reopen events",
         )
 
     # ---- Metric 2: same-reporter follow-up citing closing PR ----
+    # Trigger: the follow-up issue's created_at. Stack by reporter
+    # (author) producer.
     followups = _followup_citing_close_pr(conn, repo_id, owner, name)
     if followups.empty:
         log.info("[%s/%s] no same-reporter follow-ups citing the closing PR",
@@ -625,26 +731,24 @@ def run_for_repo(
         _write_csv_with_caveats(
             followups.sort_values("followup_created_at"), edges_path,
         )
-        by_author = (
-            followups.groupby("author_producer").size().rename("followups")
+        counts = _weekly_counts_by_producer(
+            followups, trigger_col="followup_created_at",
+            producer_col="author_producer",
         )
-        summary_path = csvs / "rq_followup_citing_close_pr_by_reporter.csv"
-        _write_csv_with_caveats(
-            by_author.reset_index(), summary_path,
-        )
-        _producer_count_bar(
-            by_author,
-            title=(
-                f"Same-reporter follow-ups citing closing PR, "
-                f"by reporter producer ({owner}/{name})"
-            ),
+        _weekly_stacked_bars_with_caveats(
+            counts,
+            title=(f"Same-reporter follow-ups citing closing PR, "
+                   f"weekly count by reporter producer ({owner}/{name})"),
             out_png=plots / "rq_followup_citing_close_pr.png",
             out_html=htmls / "rq_followup_citing_close_pr.html",
-            tab_title=f"{name}: follow-ups citing close PR",
+            out_csv=csvs / "rq_followup_citing_close_pr.csv",
+            tab_title=f"{name}: follow-ups citing close PR (weekly)",
             y_label="follow-up issues",
         )
 
     # ---- Metric 3: post-close phrase matches ----
+    # Trigger: the matching comment's commented_at. Stack by closer
+    # producer. One chart per tier.
     phrases = _post_close_phrase_matches(conn, repo_id)
     if phrases.empty:
         log.info("[%s/%s] no post-close phrase matches", owner, name)
@@ -658,24 +762,27 @@ def run_for_repo(
             sub = phrases[phrases["tier"] == tier]
             if sub.empty:
                 continue
-            by_closer = sub.groupby("closer_producer").size().rename("matches")
-            summary_path = csvs / f"rq_post_close_phrase_{tier}_by_closer.csv"
-            _write_csv_with_caveats(
-                by_closer.reset_index(), summary_path,
+            counts = _weekly_counts_by_producer(
+                sub, trigger_col="commented_at",
+                producer_col="closer_producer",
             )
-            _producer_count_bar(
-                by_closer,
-                title=(
-                    f"Post-close {tier} dissatisfaction-phrase matches, "
-                    f"by closer producer ({owner}/{name})"
-                ),
+            _weekly_stacked_bars_with_caveats(
+                counts,
+                title=(f"Post-close {tier} dissatisfaction-phrase matches, "
+                       f"weekly count by closer producer ({owner}/{name})"),
                 out_png=plots / f"rq_post_close_phrase_{tier}.png",
                 out_html=htmls / f"rq_post_close_phrase_{tier}.html",
-                tab_title=f"{name}: post-close phrase ({tier})",
+                out_csv=csvs / f"rq_post_close_phrase_{tier}.csv",
+                tab_title=f"{name}: post-close phrase {tier} (weekly)",
                 y_label="matching comments",
             )
 
     # ---- Metric 4: cross-reference patterns ----
+    # Trigger: the cross-reference event's xref_at. Stack by closer
+    # producer of the closed issue. The per-event CSV preserves the
+    # before_close/after_close/never_closed split for readers who
+    # want to subset by direction; the weekly plot is a single
+    # stacked-bar series across all directions.
     xrefs = _cross_reference_patterns(conn, repo_id)
     if xrefs.empty:
         log.info("[%s/%s] no cross-reference events", owner, name)
@@ -689,67 +796,20 @@ def run_for_repo(
             ]].sort_values("xref_at"),
             edges_path,
         )
-        ct = (
-            xrefs.groupby(["relative_to_close", "closer_producer"])
-                 .size()
-                 .unstack(fill_value=0)
-                 .sort_index()
+        counts = _weekly_counts_by_producer(
+            xrefs, trigger_col="xref_at",
+            producer_col="closer_producer",
         )
-        producers = _ordered_producers(list(ct.columns))
-        ct = ct.reindex(columns=producers, fill_value=0)
-        summary_path = csvs / "rq_cross_reference_crosstab.csv"
-        with summary_path.open("w") as f:
-            f.write(CAVEAT_HEADER)
-            ct.to_csv(f)
-        log.info("wrote %s", summary_path)
-
-        # Stacked bar: one bar per relative_to_close, stacked by producer.
-        out_png = plots / "rq_cross_reference_crosstab.png"
-        out_html = htmls / "rq_cross_reference_crosstab.html"
-        out_png.parent.mkdir(parents=True, exist_ok=True)
-        out_html.parent.mkdir(parents=True, exist_ok=True)
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-        bottoms = np.zeros(len(ct.index))
-        x = np.arange(len(ct.index))
-        for p in ct.columns:
-            vals = ct[p].values.astype(float)
-            ax.bar(x, vals, bottom=bottoms, label=p)
-            bottoms += vals
-        ax.set_xticks(x)
-        ax.set_xticklabels(ct.index, rotation=15, ha="right")
-        ax.set_ylabel("cross-reference events")
-        ax.set_title(
-            f"Cross-references on issues, by close-relative timing "
-            f"and closer producer ({owner}/{name})"
+        _weekly_stacked_bars_with_caveats(
+            counts,
+            title=(f"Cross-references on issues, weekly count by closer "
+                   f"producer ({owner}/{name})"),
+            out_png=plots / "rq_cross_reference.png",
+            out_html=htmls / "rq_cross_reference.html",
+            out_csv=csvs / "rq_cross_reference.csv",
+            tab_title=f"{name}: cross-references (weekly)",
+            y_label="cross-reference events",
         )
-        ax.legend(loc="upper right", fontsize=8)
-        fig.tight_layout()
-        fig.savefig(out_png, dpi=120)
-        plt.close(fig)
-        log.info("wrote %s", out_png)
-
-        pfig = go.Figure()
-        for p in ct.columns:
-            pfig.add_trace(go.Bar(
-                name=p,
-                x=list(ct.index),
-                y=ct[p].values.tolist(),
-            ))
-        pfig.update_layout(
-            barmode="stack",
-            title=(
-                f"Cross-references on issues, by close-relative timing "
-                f"and closer producer ({owner}/{name})"
-            ),
-            xaxis_title="relative to close",
-            yaxis_title="cross-reference events",
-            template="plotly_white",
-        )
-        write_html_with_title(
-            pfig, out_html, f"{name}: cross-ref crosstab"
-        )
-        log.info("wrote %s", out_html)
 
 
 def main(argv: list[str] | None = None) -> int:

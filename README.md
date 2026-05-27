@@ -60,22 +60,24 @@ Build the image:
     docker build -t console-analysis .
 
 Run an extraction. Bind-mount the analysis repo (so the container sees
-`config.yaml`), the data directory, the output directory, and the
-parent of your local git clones (read-only); pass the PAT. Use
+`config.yaml`), the data directory, and the parent of your local git
+clones (read-only); pass the PAT. Use
 `--user "$(id -u):$(id -g)"` so files written into the bind-mounted
 directories are owned by your host user. The example assumes the
 analysis repo and its sibling clones (`console`, `infra`, …) live
-under a common parent directory:
+under a common parent directory.
+
+The GitHub extractor pulls issues, PRs, timelines, reviews,
+comments, reactions, and workflow run metadata via the GitHub REST
+API:
 
     docker run --rm \
       --user "$(id -u):$(id -g)" \
       -e GITHUB_TOKEN \
       -v "$(pwd):/config:ro" \
       -v "$(pwd)/data:/data" \
-      -v "$(pwd)/output:/output" \
-      -v "$(cd .. && pwd):/repos:ro" \
       console-analysis \
-      -m src.extractor_github --config /config/config.yaml
+      -m src.extractor_github --config /config/config.yaml --verbose
 
 `$(cd .. && pwd)` resolves to the absolute path of the parent of the
 analysis repo. The names of the sibling clones inside that parent
@@ -83,14 +85,17 @@ analysis repo. The names of the sibling clones inside that parent
 each `local_clone` value in `config.yaml` (the example uses
 `/repos/console`, `/repos/infra`).
 
-To run the git extractor or any other module, change the trailing
-arguments:
+The git extractor walks the local git clones and doesn't talk to
+GitHub, so `GITHUB_TOKEN` is not needed; in exchange it needs the
+`/repos` bind mount so the container can read those clones:
 
-    docker run --rm --user "$(id -u):$(id -g)" ... console-analysis \
-      -m src.extractor_git --config /config/config.yaml
-
-The git extractor doesn't talk to GitHub, so the `GITHUB_TOKEN`
-environment variable can be omitted for it.
+    docker run --rm \
+      --user "$(id -u):$(id -g)" \
+      -v "$(pwd):/config:ro" \
+      -v "$(pwd)/data:/data" \
+      -v "$(cd .. && pwd):/repos:ro" \
+      console-analysis \
+      -m src.extractor_git --config /config/config.yaml --verbose
 
 ## Running the classifier
 
@@ -283,14 +288,29 @@ file can be re-windowed without re-running the module (e.g.,
 row can be looked up directly on the GitHub UI); `issue_id` and
 `pr_id` are the analysis database's primary keys.
 
-`speed` produces four speed-and-cadence metrics (issue-to-first-
-linked-PR latency, PR-open-to-merge, post-cutoff fast-close, and
-MTTR with first-close, cumulative-open, and final-close
-methodologies side by side). Per DESIGN.md these are speed metrics,
-not quality metrics. Optional `--fast-close-start YYYY-MM-DD`
-overrides the default `2026-05-03` cutoff for the fast-close metric
-only:
+`speed` produces weekly time-series speed-and-cadence metrics. Per
+DESIGN.md these are speed metrics, not quality metrics, and the
+corpus is non-stationary on a timescale of weeks (six ACMM-paper
+era transitions in five months), so all outputs are weekly time
+series with era-boundary annotations rather than aggregates over
+the full window. Per-issue / per-PR values are placed in a weekly
+bin by the closing PR's `merged_at`, with a fallback to the issue's
+`closed_at` for issues closed without a linked merged PR. Optional
+`--fast-close-threshold-minutes` (default `5`) sets the threshold
+for the fast-close count metric:
 
+  - `speed_issue_to_first_linked_pr` — weekly median by issue
+    producer of `issue.created_at -> first-linked-PR.merged_at`.
+  - `speed_pr_open_to_merge` — weekly median by PR producer of
+    `pr.created_at -> pr.merged_at`.
+  - `speed_fast_close` — weekly count of issues closed within
+    `--fast-close-threshold-minutes` minutes of being opened,
+    stacked by closer producer.
+  - `speed_mttr_{cumulative_open,final_close}_{median,mean}` — four
+    charts (two methodologies × two statistics), each a weekly
+    line per closer producer.
+
+```
     docker run --rm \
       --user "$(id -u):$(id -g)" \
       -v "$(pwd):/config:ro" \
@@ -298,15 +318,19 @@ only:
       -v "$(pwd)/output:/output" \
       console-analysis \
       -m src.analysis.speed --config /config/config.yaml --verbose
+```
 
-`resolution_quality` produces the two-regime resolution-quality
-signals from DESIGN.md: high-precision/low-recall (reopen by
-original reporter; same-reporter follow-up citing the closing PR)
-and low-precision/higher-recall (post-close phrase matches in
-stronger and weaker tiers; cross-reference patterns split before
-and after close). Every output CSV is preceded by a single-line
-caveat header naming the four shared limitations from DESIGN.md
-(silent drops, bidirectional adoption lag, attention non-uniformity,
+`resolution_quality` produces weekly time-series resolution-quality
+signals: high-precision/low-recall (reopen by original reporter;
+same-reporter follow-up citing the closing PR) and
+low-precision/higher-recall (post-close phrase matches in `explicit`
+and `general` tiers; cross-reference events). Each metric is binned
+weekly by its signal trigger (reopen `created_at`, follow-up issue
+`created_at`, comment `commented_at`, cross-reference `xref_at`)
+and stacked by the relevant producer. Era boundaries are annotated
+on every plot. Every output CSV is preceded by a single-line caveat
+header naming the four shared limitations from DESIGN.md (silent
+drops, bidirectional adoption lag, attention non-uniformity,
 multi-case bundling); convergence across signals is informative,
 divergence is ambiguous, and a low reading in every signal is *not*
 evidence the underlying phenomenon is absent:

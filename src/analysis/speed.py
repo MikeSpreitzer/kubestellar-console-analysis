@@ -2,42 +2,65 @@
 # SPDX-License-Identifier: Apache-2.0
 # Authored by Mike Spreitzer with assistance from Claude (Anthropic, Opus 4.7).
 
-"""Speed and cadence metrics.
+"""Speed and cadence metrics, weekly time series.
 
 Per DESIGN.md these are speed metrics, not quality metrics. A high
 throughput system can be shipping bad work quickly; nothing here makes
 a quality claim.
 
-Metrics produced (all per subject repo):
+Per DESIGN.md's era-awareness section the corpus is non-stationary on
+a timescale of weeks (six ACMM-paper layer transitions in five months),
+so all outputs are weekly time series rather than aggregates over the
+full window. Era-boundary annotations are drawn on every plot.
 
-- ``speed_issue_to_first_linked_pr``: distribution of the interval
-  between an issue's ``created_at`` and the ``merged_at`` of the
-  earliest PR linked to it (via ``linked_pr`` only). Reported as
-  histogram (PNG + HTML) and CSV, with breakdown by issue-author
-  producer.
+Per-issue / per-PR values are placed in a weekly bin by the
+**closing-PR's ``merged_at``** (the most recently merged linked PR),
+with a fallback to the issue's ``closed_at`` for issues closed
+without a linked merged PR. Issues closed without a PR are included;
+the docstring of each metric notes which timestamp was used.
 
-- ``speed_pr_open_to_merge``: distribution of the interval between a
-  PR's ``created_at`` and ``merged_at``. Reported as histogram (PNG
-  + HTML) and CSV, with breakdown by PR-author producer.
+Exception: ``speed_issue_to_first_linked_pr`` measures the latency to
+the *first* linked PR merge, not the closer, so it bins by that
+first-merged PR's ``merged_at`` rather than by the closing PR's.
+Internally consistent with the metric being measured; deviates from
+the uniform binning rule above.
 
-- ``speed_fast_close``: post-cutoff (default 2026-05-03,
-  ``--start-date`` overrides) histogram of the interval between an
-  issue's ``created_at`` and ``closed_at``. Plus a threshold table at
-  {1, 5, 15, 60} minutes giving counts and producer breakdown of the
-  closer at each threshold.
+Metrics produced (all per subject repo, all weekly):
 
-- ``speed_mttr``: per-issue Mean Time To Resolution methodologies
-  reported side by side, broken out by closer producer:
+- ``speed_issue_to_first_linked_pr``: median per week per issue-author
+  producer of the interval from issue ``created_at`` to the
+  first-linked PR's ``merged_at``. Bin: that first-merged PR's
+  ``merged_at``. Edges from ``linked_pr`` only.
 
-  * first-close interval: created_at -> first observed close
-  * final-close interval: created_at -> last observed close (or
-    closed_at if no events recorded)
-  * cumulative-open time: sum of (open -> close) intervals across
-    the issue's life
+- ``speed_pr_open_to_merge``: median per week per PR-author producer
+  of the interval from PR ``created_at`` to PR ``merged_at``.
 
-  The gap between cumulative-open and final-close is itself reported
-  per the DESIGN.md recommendation; an issue closed once and never
-  reopened has cumulative-open == first-close == final-close.
+- ``speed_fast_close``: count per week of issues closed within
+  ``--fast-close-threshold-minutes`` minutes (default 5) of being
+  opened, stacked by closer producer. Use the threshold flag to
+  produce the count for any threshold; this replaces the previous
+  cumulative threshold table at fixed multiples.
+
+- ``speed_mttr_*``: four separate charts, all stacked by closer
+  producer. Each is per-week per-producer. The ``cumulative_open``
+  methodology is the sum of ``(open -> close)`` intervals across the
+  issue's life (excludes any closed-then-reopened gap); the
+  ``final_close`` methodology is ``created_at -> last observed close``.
+  The previous ``first_close`` methodology has been dropped per the
+  conversation that produced this rewrite.
+
+  * ``speed_mttr_cumulative_open_median``
+  * ``speed_mttr_cumulative_open_mean``
+  * ``speed_mttr_final_close_median``
+  * ``speed_mttr_final_close_mean``
+
+  DESIGN.md recommends paying attention to the gap between
+  cumulative-open and final-close (an indicator of reopen-driven
+  abandonment). That gap is not plotted directly; both methodologies
+  appear side by side in their own charts, and the per-issue CSV
+  ``speed_mttr_per_issue.csv`` carries both columns plus
+  ``reopen_count`` so a reader can compute the gap and the
+  reopen-frequency signal directly.
 
 Run as ``python -m src.analysis.speed --config /config/config.yaml``.
 """
@@ -67,21 +90,14 @@ from ..classifier.rules import (
 )
 from ..common.config import load_config
 from ..common.db import connect_readonly
+from ..common.eras import annotate_matplotlib, annotate_plotly, to_week
 from ._plotly_html import write_html_with_title
 
 
 log = logging.getLogger(__name__)
 
 
-DEFAULT_FAST_CLOSE_START = "2026-05-03"
-FAST_CLOSE_THRESHOLDS_MINUTES = (1, 5, 15, 60)
-
-# Histogram bin edges in minutes, log-spaced. 1 min .. 90 days.
-HIST_BIN_EDGES_MINUTES = np.array([
-    0.5, 1, 2, 5, 10, 30, 60, 120,
-    60 * 6, 60 * 24, 60 * 24 * 3, 60 * 24 * 7,
-    60 * 24 * 14, 60 * 24 * 30, 60 * 24 * 90,
-])
+DEFAULT_FAST_CLOSE_THRESHOLD_MIN = 5
 
 PRODUCER_DISPLAY_ORDER = (
     PRODUCER_HUMAN,
@@ -122,8 +138,8 @@ def _classify_login(login: Optional[str]) -> str:
 
 
 def _ordered_producers(values: list[str]) -> list[str]:
-    seen = set()
-    out = []
+    seen: set[str] = set()
+    out: list[str] = []
     for p in PRODUCER_DISPLAY_ORDER:
         if p in values and p not in seen:
             out.append(p)
@@ -132,112 +148,206 @@ def _ordered_producers(values: list[str]) -> list[str]:
     return out + extras
 
 
-def _format_minutes(m: float) -> str:
-    """Pretty-print a minute count (used for histogram tick labels)."""
-    if m < 1:
-        return f"{int(m * 60)}s"
-    if m < 60:
-        return f"{int(m)}m"
-    if m < 60 * 24:
-        return f"{int(m / 60)}h"
-    return f"{int(m / 60 / 24)}d"
+# to_week lives in src/common/eras.py and is imported above.
+# A local _to_week alias keeps the call sites tidy.
+_to_week = to_week
 
 
 # ----------------------------------------------------------------------
-# Histogram helper
+# Generic plot helpers
 # ----------------------------------------------------------------------
 
-def _plot_log_histogram(
-    minutes: pd.Series,
+def _weekly_stacked_bars(
+    df: pd.DataFrame,
+    *,
     title: str,
     out_png: Path,
     out_html: Path,
     tab_title: str,
-    *,
-    by_producer: Optional[pd.DataFrame] = None,
+    y_label: str,
 ) -> None:
-    """Plot histogram on a log-minute x-axis. If ``by_producer`` is
-    given (DataFrame indexed like ``minutes`` with a 'producer' column
-    aligned to it), produce a stacked-by-producer view; otherwise a
-    single-bar view.
+    """Plot a weekly stacked-bar chart.
 
-    Args:
-        minutes: Series of latencies in minutes.
-        by_producer: DataFrame with 'producer' column, same index as
-            ``minutes``.
+    ``df`` must be a wide DataFrame indexed by tz-aware weekly
+    timestamps, with one column per producer.
     """
-    if minutes.empty:
+    if df.empty:
         log.warning("no data for %s", title)
         return
     out_png.parent.mkdir(parents=True, exist_ok=True)
     out_html.parent.mkdir(parents=True, exist_ok=True)
 
-    bins = HIST_BIN_EDGES_MINUTES
-    if by_producer is None:
-        counts, _ = np.histogram(minutes.values, bins=bins)
-        producers = ["all"]
-        per_producer = {"all": counts}
-    else:
-        df = by_producer.copy()
-        df["minutes"] = minutes.values
-        producers = _ordered_producers(list(df["producer"].unique()))
-        per_producer = {}
-        for p in producers:
-            sub = df[df["producer"] == p]["minutes"].values
-            per_producer[p], _ = np.histogram(sub, bins=bins)
+    producers = _ordered_producers(list(df.columns))
+    df = df.reindex(columns=producers, fill_value=0)
 
-    centers = (bins[:-1] * bins[1:]) ** 0.5  # geometric centers
+    weeks = df.index
+    weeks_native = weeks.to_pydatetime()
 
-    # PNG (matplotlib): stacked bars
     fig, ax = plt.subplots(figsize=(13, 5))
-    bottoms = np.zeros(len(centers))
+    bottoms = np.zeros(len(weeks))
+    width = 6.0  # days; bar covers most of the week
     for p in producers:
-        ax.bar(centers, per_producer[p], width=np.diff(bins) * 0.9,
-               bottom=bottoms, align="center", label=p)
-        bottoms = bottoms + per_producer[p]
-    ax.set_xscale("log")
-    ax.set_xlabel("latency (log scale)")
-    ax.set_ylabel("count")
+        vals = df[p].values.astype(float)
+        ax.bar(weeks_native, vals, width=width, bottom=bottoms,
+               align="edge", label=p)
+        bottoms = bottoms + vals
+    ax.set_xlabel("week")
+    ax.set_ylabel(y_label)
     ax.set_title(title)
-    edge_labels = [_format_minutes(b) for b in bins]
-    ax.set_xticks(bins)
-    ax.set_xticklabels(edge_labels, rotation=45, ha="right", fontsize=8)
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, alpha=0.3, which="both", axis="y")
+    ax.legend(loc="upper left", fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3, axis="y")
+    if len(weeks) > 0:
+        annotate_matplotlib(
+            ax, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
+        )
+    fig.autofmt_xdate()
     fig.tight_layout()
     fig.savefig(out_png, dpi=120)
     plt.close(fig)
     log.info("wrote %s", out_png)
 
-    # HTML (plotly): stacked bars
     pfig = go.Figure()
-    edge_labels_str = [_format_minutes(b) for b in bins]
     for p in producers:
         pfig.add_trace(go.Bar(
-            x=[edge_labels_str[i] + "-" + edge_labels_str[i + 1]
-               for i in range(len(bins) - 1)],
-            y=per_producer[p],
+            x=list(weeks),
+            y=df[p].values.tolist(),
             name=p,
-            hovertemplate="bin: %{x}<br>" + p + ": %{y}<extra></extra>",
+            hovertemplate="%{x|%Y-%m-%d}<br>" + p + ": %{y}<extra></extra>",
         ))
     pfig.update_layout(
         title=title,
-        xaxis_title="latency bin",
-        yaxis_title="count",
+        xaxis_title="week",
+        yaxis_title=y_label,
         barmode="stack",
         template="plotly_white",
     )
+    if len(weeks) > 0:
+        annotate_plotly(
+            pfig, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
+        )
+    write_html_with_title(pfig, out_html, tab_title)
+    log.info("wrote %s", out_html)
+
+
+def _weekly_per_producer_lines(
+    df: pd.DataFrame,
+    *,
+    title: str,
+    out_png: Path,
+    out_html: Path,
+    tab_title: str,
+    y_label: str,
+    log_y: bool = True,
+) -> None:
+    """Plot a weekly per-producer line chart of a statistic.
+
+    ``df`` must be indexed by tz-aware weekly timestamps with one
+    column per producer; cells are the statistic value (median or mean
+    minutes) for that (week, producer). Missing weeks for a producer
+    are NaN and not plotted.
+    """
+    if df.empty:
+        log.warning("no data for %s", title)
+        return
+    out_png.parent.mkdir(parents=True, exist_ok=True)
+    out_html.parent.mkdir(parents=True, exist_ok=True)
+
+    producers = _ordered_producers(list(df.columns))
+    df = df.reindex(columns=producers)
+
+    weeks = df.index
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    for p in producers:
+        vals = df[p].values
+        if np.all(pd.isna(vals)):
+            continue
+        ax.plot(weeks.to_pydatetime(), vals, marker="o",
+                markersize=4, linewidth=1.0, label=p)
+    if log_y:
+        ax.set_yscale("log")
+    ax.set_xlabel("week")
+    ax.set_ylabel(y_label)
+    ax.set_title(title)
+    ax.legend(loc="upper right", fontsize=8, ncol=2)
+    ax.grid(True, alpha=0.3, axis="both", which="both")
+    if len(weeks) > 0:
+        annotate_matplotlib(
+            ax, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
+        )
+    fig.autofmt_xdate()
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=120)
+    plt.close(fig)
+    log.info("wrote %s", out_png)
+
+    pfig = go.Figure()
+    for p in producers:
+        vals = df[p]
+        if vals.dropna().empty:
+            continue
+        pfig.add_trace(go.Scatter(
+            x=list(weeks), y=vals.tolist(), name=p, mode="lines+markers",
+            hovertemplate=("%{x|%Y-%m-%d}<br>" + p + ": %{y:.1f}"
+                           "<extra></extra>"),
+        ))
+    pfig.update_layout(
+        title=title, xaxis_title="week", yaxis_title=y_label,
+        template="plotly_white",
+        yaxis_type="log" if log_y else "linear",
+    )
+    if len(weeks) > 0:
+        annotate_plotly(
+            pfig, xlim=(weeks.min(), weeks.max() + pd.Timedelta(days=7)),
+        )
     write_html_with_title(pfig, out_html, tab_title)
     log.info("wrote %s", out_html)
 
 
 # ----------------------------------------------------------------------
-# Issue -> first linked PR (full history)
+# Closing-PR merged_at lookup: given an issue, the merged_at of the
+# most recently merged linked PR (or NULL).
+# ----------------------------------------------------------------------
+
+def _closing_pr_merged_at(
+    conn: sqlite3.Connection, repo_id: int
+) -> dict[int, str]:
+    """For each issue in repo_id with at least one linked merged PR,
+    return issue_id -> ISO timestamp of that PR's merged_at (taking
+    the most recently-merged PR if more than one is linked).
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            lp.issue_id,
+            MAX(pr.merged_at) AS pr_merged_at
+        FROM linked_pr lp
+        JOIN issue i_iss ON i_iss.issue_id = lp.issue_id
+        JOIN issue i_pr  ON i_pr.issue_id  = lp.pr_id
+        JOIN pull_request pr ON pr.issue_id = i_pr.issue_id
+        WHERE i_iss.repo_id = ?
+          AND i_iss.is_pr   = 0
+          AND i_pr.is_pr    = 1
+          AND pr.merged     = 1
+          AND pr.merged_at IS NOT NULL
+        GROUP BY lp.issue_id
+        """,
+        (repo_id,),
+    ).fetchall()
+    return {r["issue_id"]: r["pr_merged_at"] for r in rows}
+
+
+# ----------------------------------------------------------------------
+# Issue -> first linked PR merge (weekly median by issue producer)
 # ----------------------------------------------------------------------
 
 def _issue_to_first_linked_pr(
     conn: sqlite3.Connection, repo_id: int
 ) -> pd.DataFrame:
+    """Per-issue: created_at -> first linked PR's merged_at, plus
+    issue-author producer. Bin column 'bin_ts' is the first-linked
+    PR's merged_at (no fallback needed; an issue without a linked
+    merged PR has no value here)."""
     rows = conn.execute(
         """
         SELECT
@@ -267,11 +377,12 @@ def _issue_to_first_linked_pr(
     df = df[df["merged_at_dt"] >= df["created_at_dt"]]
     df["minutes"] = (df["merged_at_dt"] - df["created_at_dt"]).dt.total_seconds() / 60.0
     df["issue_producer"] = df["issue_author_login"].apply(_classify_login)
+    df["bin_ts"] = df["merged_at_dt"]
     return df
 
 
 # ----------------------------------------------------------------------
-# PR open to merge (full history)
+# PR open to merge (weekly median by PR producer)
 # ----------------------------------------------------------------------
 
 def _pr_open_to_merge(
@@ -302,16 +413,29 @@ def _pr_open_to_merge(
     df = df[df["merged_at_dt"] >= df["created_at_dt"]]
     df["minutes"] = (df["merged_at_dt"] - df["created_at_dt"]).dt.total_seconds() / 60.0
     df["pr_producer"] = df["pr_author_login"].apply(_classify_login)
+    df["bin_ts"] = df["merged_at_dt"]
     return df
 
 
 # ----------------------------------------------------------------------
-# Fast-close (post-cutoff)
+# Fast-close data (issues closed within threshold)
 # ----------------------------------------------------------------------
 
 def _fast_close_data(
-    conn: sqlite3.Connection, repo_id: int, start_date: str
+    conn: sqlite3.Connection,
+    repo_id: int,
+    threshold_minutes: int,
+    *,
+    closing_merged_at: dict[int, str],
 ) -> pd.DataFrame:
+    """Per-issue: created_at, closed_at, closer producer, minutes.
+    Restricted to issues closed within ``threshold_minutes``. Bin is
+    the closing PR's merged_at if linked, else the issue's closed_at.
+
+    ``closing_merged_at`` is an issue_id -> ISO-string dict supplied by
+    the caller (run_for_repo computes it once and shares with
+    _mttr_data).
+    """
     rows = conn.execute(
         """
         SELECT
@@ -325,9 +449,8 @@ def _fast_close_data(
         WHERE i.repo_id = ?
           AND i.is_pr = 0
           AND i.closed_at IS NOT NULL
-          AND i.created_at >= ?
         """,
-        (repo_id, start_date),
+        (repo_id,),
     ).fetchall()
     df = pd.DataFrame([dict(r) for r in rows])
     if df.empty:
@@ -337,28 +460,25 @@ def _fast_close_data(
     df = df.dropna(subset=["created_at_dt", "closed_at_dt"])
     df = df[df["closed_at_dt"] >= df["created_at_dt"]]
     df["minutes"] = (df["closed_at_dt"] - df["created_at_dt"]).dt.total_seconds() / 60.0
-    df["closer_producer"] = df["closer_login"].apply(_classify_login)
+    # Cache classify-by-login over distinct values; avoids one
+    # classify(Record(...)) call per row when most rows repeat a small
+    # set of bot logins (github-actions, kubestellar-hive, ...).
+    closer_producer_by_login = {
+        login: _classify_login(login)
+        for login in df["closer_login"].drop_duplicates().tolist()
+    }
+    df["closer_producer"] = df["closer_login"].map(closer_producer_by_login)
+
+    df = df[df["minutes"] <= threshold_minutes]
+    if df.empty:
+        return df
+
+    bin_strs = df["issue_id"].map(closing_merged_at)
+    bin_ts_from_pr = pd.to_datetime(bin_strs, utc=True, errors="coerce")
+    df["bin_ts"] = bin_ts_from_pr.where(
+        bin_ts_from_pr.notna(), df["closed_at_dt"]
+    )
     return df
-
-
-def _fast_close_threshold_table(df: pd.DataFrame) -> pd.DataFrame:
-    """Counts at each threshold, broken out by closer producer."""
-    rows = []
-    for t in FAST_CLOSE_THRESHOLDS_MINUTES:
-        sub = df[df["minutes"] <= t]
-        per = sub.groupby("closer_producer").size()
-        for producer, count in per.items():
-            rows.append({
-                "threshold_minutes": t,
-                "closer_producer":   producer,
-                "count":             int(count),
-            })
-        rows.append({
-            "threshold_minutes": t,
-            "closer_producer":   "TOTAL",
-            "count":             int(len(sub)),
-        })
-    return pd.DataFrame(rows)
 
 
 # ----------------------------------------------------------------------
@@ -366,18 +486,26 @@ def _fast_close_threshold_table(df: pd.DataFrame) -> pd.DataFrame:
 # ----------------------------------------------------------------------
 
 def _mttr_data(
-    conn: sqlite3.Connection, repo_id: int
+    conn: sqlite3.Connection,
+    repo_id: int,
+    *,
+    closing_merged_at: dict[int, str],
 ) -> pd.DataFrame:
-    """Per-issue MTTR methodologies.
+    """Per-issue MTTR methodologies (cumulative_open and final_close;
+    first_close is not produced in this rewrite).
 
     For each closed issue, we collect:
       - created_at
-      - first_close: earliest 'closed' event, or closed_at if no events
       - final_close: latest 'closed' event, or closed_at if no events
       - cumulative_open_minutes: sum of (open->close) intervals over
         the issue's history
       - reopen_count: number of 'reopened' events
       - closer_producer: last closer (matches issue.closed_by_id)
+      - bin_ts: closing PR's merged_at if linked, else closed_at
+
+    ``closing_merged_at`` is an issue_id -> ISO-string dict supplied by
+    the caller (run_for_repo computes it once and shares with
+    _fast_close_data).
     """
     issues = pd.DataFrame([dict(r) for r in conn.execute(
         """
@@ -413,7 +541,6 @@ def _mttr_data(
         (repo_id,),
     ).fetchall()])
 
-    # Build per-issue event list including the synthetic 'created' anchor.
     by_issue: dict[int, list[tuple[str, pd.Timestamp]]] = {}
     issues["created_at_dt"] = pd.to_datetime(issues["created_at"], utc=True, errors="coerce")
     issues["closed_at_dt"]  = pd.to_datetime(issues["closed_at"],  utc=True, errors="coerce")
@@ -427,15 +554,20 @@ def _mttr_data(
                 (ev["event_type"], ev["created_at_dt"])
             )
 
+    # Precompute closer-producer lookup once per unique login (cheap
+    # dict lookup per row instead of one classify(Record) call per row).
+    closer_producer_by_login = {
+        login: _classify_login(login)
+        for login in issues["closer_login"].drop_duplicates().tolist()
+    }
+
     out_rows = []
     for _, iss in issues.iterrows():
         ev_list = by_issue.get(iss["issue_id"], [])
         ev_list = sorted(ev_list, key=lambda x: x[1])
         closes = [t for et, t in ev_list if et == "closed"]
         reopens = [t for et, t in ev_list if et == "reopened"]
-        first_close = closes[0] if closes else iss["closed_at_dt"]
         final_close = closes[-1] if closes else iss["closed_at_dt"]
-        # Cumulative open: walk a state machine over events.
         cum_seconds = 0.0
         state = "open"
         last_open_at = iss["created_at_dt"]
@@ -447,101 +579,90 @@ def _mttr_data(
                 last_open_at = t
                 state = "open"
         if state == "open":
-            # Issue was reopened and never re-closed in events; close it
-            # with the last-known close time.
-            cum_seconds += (final_close - last_open_at).total_seconds()
+            # Issue is currently closed (i.closed_at IS NOT NULL) but the
+            # event stream ends with a 'reopened'. Close it with the
+            # issue's actual current close time, not closes[-1] (which
+            # is an EARLIER 'closed' event preceding the reopen and
+            # would yield a negative duration).
+            cum_seconds += (iss["closed_at_dt"] - last_open_at).total_seconds()
         if not ev_list:
             cum_seconds = (iss["closed_at_dt"] - iss["created_at_dt"]).total_seconds()
+
         out_rows.append({
             "issue_id":     iss["issue_id"],
-            "first_close_minutes": (first_close - iss["created_at_dt"]).total_seconds() / 60.0,
             "final_close_minutes": (final_close - iss["created_at_dt"]).total_seconds() / 60.0,
             "cumulative_open_minutes": cum_seconds / 60.0,
             "reopen_count": len(reopens),
-            "closer_producer": _classify_login(iss["closer_login"]),
+            "closer_producer": closer_producer_by_login[iss["closer_login"]],
         })
-    return pd.DataFrame(out_rows)
-
-
-def _summarize_mttr(df: pd.DataFrame) -> pd.DataFrame:
+    df = pd.DataFrame(out_rows)
     if df.empty:
         return df
-    rows = []
-    for producer, sub in df.groupby("closer_producer"):
-        rows.append({
-            "closer_producer": producer,
-            "n":               int(len(sub)),
-            "n_reopened":      int((sub["reopen_count"] > 0).sum()),
-            "first_close_median_min":     float(sub["first_close_minutes"].median()),
-            "final_close_median_min":     float(sub["final_close_minutes"].median()),
-            "cumulative_open_median_min": float(sub["cumulative_open_minutes"].median()),
-            "first_close_p90_min":        float(sub["first_close_minutes"].quantile(0.9)),
-            "final_close_p90_min":        float(sub["final_close_minutes"].quantile(0.9)),
-            "cumulative_open_p90_min":    float(sub["cumulative_open_minutes"].quantile(0.9)),
-            "final_minus_cumulative_median_min":
-                float((sub["final_close_minutes"] - sub["cumulative_open_minutes"]).median()),
-        })
-    out = pd.DataFrame(rows)
-    out = out.set_index("closer_producer").reindex(
-        _ordered_producers(out["closer_producer"].tolist())
-    ).reset_index()
-    return out
-
-
-def _plot_mttr_summary(
-    summary: pd.DataFrame,
-    title: str,
-    out_png: Path,
-    out_html: Path,
-    tab_title: str,
-) -> None:
-    if summary.empty:
-        log.warning("no data for %s", title)
-        return
-    out_png.parent.mkdir(parents=True, exist_ok=True)
-    out_html.parent.mkdir(parents=True, exist_ok=True)
-
-    producers = summary["closer_producer"].tolist()
-    methods = [
-        ("first_close_median_min",     "first-close (median)"),
-        ("cumulative_open_median_min", "cumulative-open (median)"),
-        ("final_close_median_min",     "final-close (median)"),
-    ]
-    fig, ax = plt.subplots(figsize=(max(8, len(producers) * 1.3), 5))
-    width = 0.27
-    x = np.arange(len(producers))
-    for i, (col, label) in enumerate(methods):
-        ax.bar(x + (i - 1) * width, summary[col].values,
-               width=width, label=label)
-    ax.set_yscale("log")
-    ax.set_xticks(x)
-    ax.set_xticklabels(producers, rotation=30, ha="right")
-    ax.set_ylabel("median minutes (log scale)")
-    ax.set_title(title)
-    ax.legend(loc="upper right")
-    ax.grid(True, alpha=0.3, axis="y", which="both")
-    fig.tight_layout()
-    fig.savefig(out_png, dpi=120)
-    plt.close(fig)
-    log.info("wrote %s", out_png)
-
-    pfig = go.Figure()
-    for col, label in methods:
-        pfig.add_trace(go.Bar(
-            x=producers, y=summary[col],
-            name=label,
-            hovertemplate="%{x}<br>" + label + ": %{y:.1f} min<extra></extra>",
-        ))
-    pfig.update_layout(
-        title=title,
-        xaxis_title="closer producer",
-        yaxis_title="median minutes (log)",
-        yaxis_type="log",
-        barmode="group",
-        template="plotly_white",
+    # Build bin_ts as a single Series so its dtype is uniform
+    # ([us, UTC] like every other to_datetime call against SQLite ISO
+    # strings), avoiding the object-dtype hazard of mixing per-row
+    # scalar Timestamps from two different parse paths.
+    bin_ts_from_pr = pd.to_datetime(
+        df["issue_id"].map(closing_merged_at), utc=True, errors="coerce",
     )
-    write_html_with_title(pfig, out_html, tab_title)
-    log.info("wrote %s", out_html)
+    closed_at_by_issue = issues.set_index("issue_id")["closed_at_dt"]
+    df["bin_ts"] = bin_ts_from_pr.fillna(
+        df["issue_id"].map(closed_at_by_issue),
+    )
+    return df
+
+
+# ----------------------------------------------------------------------
+# Aggregation helpers: weekly counts and weekly statistics.
+# ----------------------------------------------------------------------
+
+def _weekly_counts_by_producer(
+    df: pd.DataFrame, *, producer_col: str
+) -> pd.DataFrame:
+    """Wide DataFrame indexed by week with one column per producer
+    holding counts of rows in that (week, producer) cell.
+
+    Rows whose bin_ts is NaT are dropped explicitly so the silent
+    drop in groupby is not the only place they disappear.
+    """
+    if df.empty:
+        return pd.DataFrame()
+    work = pd.DataFrame({
+        "week": _to_week(df["bin_ts"]),
+        "producer": df[producer_col],
+    }).dropna(subset=["week"])
+    if work.empty:
+        return pd.DataFrame()
+    return (
+        work.groupby(["week", "producer"]).size()
+            .unstack(fill_value=0)
+            .sort_index()
+    )
+
+
+def _weekly_stat_by_producer(
+    df: pd.DataFrame, *, producer_col: str, value_col: str, stat: str
+) -> pd.DataFrame:
+    """Wide DataFrame indexed by week with one column per producer
+    holding the named statistic (median|mean) of value_col in that
+    (week, producer) cell. NaN where no values.
+
+    Rows whose bin_ts is NaT are dropped explicitly. ``stat`` is
+    passed through to ``Series.agg`` so any pandas-recognized
+    aggregation name works (median, mean, p90 via callables, etc.)."""
+    if df.empty:
+        return pd.DataFrame()
+    work = pd.DataFrame({
+        "week": _to_week(df["bin_ts"]),
+        "producer": df[producer_col],
+        "value": df[value_col],
+    }).dropna(subset=["week"])
+    if work.empty:
+        return pd.DataFrame()
+    return (
+        work.groupby(["week", "producer"])["value"].agg(stat)
+            .unstack().sort_index()
+    )
 
 
 # ----------------------------------------------------------------------
@@ -554,7 +675,7 @@ def run_for_repo(
     name: str,
     output_dir: Path,
     *,
-    fast_close_start: str,
+    fast_close_threshold_minutes: int,
 ) -> None:
     repo_row = conn.execute(
         "SELECT repo_id FROM repo WHERE owner = ? AND name = ?",
@@ -571,84 +692,108 @@ def run_for_repo(
     csvs  = output_dir / "csv"  / safe_slug
     csvs.mkdir(parents=True, exist_ok=True)
 
-    # --- Issue -> first linked PR ---
+    # The closing-PR merged_at lookup is needed by both fast_close
+    # (for binning) and mttr (for binning); compute once per repo and
+    # share to avoid running the identical SQL twice.
+    closing_merged_at = _closing_pr_merged_at(conn, repo_id)
+
+    # --- Issue -> first linked PR merge: weekly median by issue producer ---
     df_i2p = _issue_to_first_linked_pr(conn, repo_id)
     if not df_i2p.empty:
         df_i2p[[
             "issue_id", "issue_created_at", "first_pr_merged_at",
             "minutes", "issue_producer", "issue_author_login",
+            "bin_ts",
         ]].to_csv(csvs / "speed_issue_to_first_linked_pr.csv", index=False)
-        _plot_log_histogram(
-            df_i2p["minutes"],
-            title=f"Issue open -> first linked PR merge ({owner}/{name})",
+        wk = _weekly_stat_by_producer(
+            df_i2p, producer_col="issue_producer",
+            value_col="minutes", stat="median",
+        )
+        _weekly_per_producer_lines(
+            wk,
+            title=(f"Issue open -> first linked PR merge, "
+                   f"weekly median by issue producer ({owner}/{name})"),
             out_png=plots / "speed_issue_to_first_linked_pr.png",
             out_html=htmls / "speed_issue_to_first_linked_pr.html",
-            tab_title=f"{name}: issue->first linked PR",
-            by_producer=df_i2p[["issue_producer"]].rename(
-                columns={"issue_producer": "producer"}
-            ),
+            tab_title=f"{name}: issue->first linked PR merge (weekly)",
+            y_label="median minutes (log)",
         )
 
-    # --- PR open to merge ---
+    # --- PR open to merge: weekly median by PR producer ---
     df_pr = _pr_open_to_merge(conn, repo_id)
     if not df_pr.empty:
         df_pr[[
             "pr_id", "pr_created_at", "pr_merged_at",
             "minutes", "pr_producer", "pr_author_login",
+            "bin_ts",
         ]].to_csv(csvs / "speed_pr_open_to_merge.csv", index=False)
-        _plot_log_histogram(
-            df_pr["minutes"],
-            title=f"PR open -> merge ({owner}/{name})",
+        wk = _weekly_stat_by_producer(
+            df_pr, producer_col="pr_producer",
+            value_col="minutes", stat="median",
+        )
+        _weekly_per_producer_lines(
+            wk,
+            title=(f"PR open -> merge, weekly median by PR producer "
+                   f"({owner}/{name})"),
             out_png=plots / "speed_pr_open_to_merge.png",
             out_html=htmls / "speed_pr_open_to_merge.html",
-            tab_title=f"{name}: PR open->merge",
-            by_producer=df_pr[["pr_producer"]].rename(
-                columns={"pr_producer": "producer"}
-            ),
+            tab_title=f"{name}: PR open->merge (weekly)",
+            y_label="median minutes (log)",
         )
 
-    # --- Fast close (post-cutoff) ---
-    df_fc = _fast_close_data(conn, repo_id, fast_close_start)
+    # --- Fast close: weekly count of close-within-threshold, stacked by closer ---
+    df_fc = _fast_close_data(
+        conn, repo_id, fast_close_threshold_minutes,
+        closing_merged_at=closing_merged_at,
+    )
+    log.info(
+        "[%s/%s] fast-close (<= %d min): %d issues",
+        owner, name, fast_close_threshold_minutes, len(df_fc),
+    )
     if not df_fc.empty:
         df_fc[[
             "issue_id", "number", "created_at", "closed_at",
             "minutes", "closer_producer", "closer_login",
+            "bin_ts",
         ]].to_csv(csvs / "speed_fast_close_issues.csv", index=False)
-        thresh = _fast_close_threshold_table(df_fc)
-        thresh.to_csv(csvs / "speed_fast_close_thresholds.csv", index=False)
-        _plot_log_histogram(
-            df_fc["minutes"],
-            title=(
-                f"Issue close latency since {fast_close_start} "
-                f"({owner}/{name})"
-            ),
-            out_png=plots / "speed_fast_close_distribution.png",
-            out_html=htmls / "speed_fast_close_distribution.html",
-            tab_title=f"{name}: fast-close distribution",
-            by_producer=df_fc[["closer_producer"]].rename(
-                columns={"closer_producer": "producer"}
-            ),
+        counts = _weekly_counts_by_producer(
+            df_fc, producer_col="closer_producer",
         )
-        log.info(
-            "[%s/%s] fast-close (since %s): %d issues, %d <=5min, %d <=60min",
-            owner, name, fast_close_start, len(df_fc),
-            int((df_fc["minutes"] <= 5).sum()),
-            int((df_fc["minutes"] <= 60).sum()),
+        counts.to_csv(csvs / "speed_fast_close.csv")
+        _weekly_stacked_bars(
+            counts,
+            title=(f"Fast-close: issues closed <= "
+                   f"{fast_close_threshold_minutes} min after open, "
+                   f"weekly count by closer producer ({owner}/{name})"),
+            out_png=plots / "speed_fast_close.png",
+            out_html=htmls / "speed_fast_close.html",
+            tab_title=f"{name}: fast-close (weekly)",
+            y_label="issues closed within threshold",
         )
 
-    # --- MTTR ---
-    df_mttr = _mttr_data(conn, repo_id)
+    # --- MTTR: four charts (cumulative_open|final_close x median|mean) ---
+    df_mttr = _mttr_data(conn, repo_id, closing_merged_at=closing_merged_at)
     if not df_mttr.empty:
         df_mttr.to_csv(csvs / "speed_mttr_per_issue.csv", index=False)
-        summary = _summarize_mttr(df_mttr)
-        summary.to_csv(csvs / "speed_mttr_summary.csv", index=False)
-        _plot_mttr_summary(
-            summary,
-            title=f"MTTR (median) by closer producer ({owner}/{name})",
-            out_png=plots / "speed_mttr_summary.png",
-            out_html=htmls / "speed_mttr_summary.html",
-            tab_title=f"{name}: MTTR summary",
-        )
+        for value_col, slug, label in [
+            ("cumulative_open_minutes", "cumulative_open", "cumulative-open"),
+            ("final_close_minutes",     "final_close",     "final-close"),
+        ]:
+            for stat in ("median", "mean"):
+                wk = _weekly_stat_by_producer(
+                    df_mttr, producer_col="closer_producer",
+                    value_col=value_col, stat=stat,
+                )
+                wk.to_csv(csvs / f"speed_mttr_{slug}_{stat}.csv")
+                _weekly_per_producer_lines(
+                    wk,
+                    title=(f"MTTR ({label}, weekly {stat}) "
+                           f"by closer producer ({owner}/{name})"),
+                    out_png=plots / f"speed_mttr_{slug}_{stat}.png",
+                    out_html=htmls / f"speed_mttr_{slug}_{stat}.html",
+                    tab_title=f"{name}: MTTR {label} {stat} (weekly)",
+                    y_label=f"{stat} minutes (log)",
+                )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -656,12 +801,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--config", required=True, help="path to config.yaml")
     p.add_argument("--verbose", action="store_true")
     p.add_argument(
-        "--fast-close-start",
-        default=DEFAULT_FAST_CLOSE_START,
+        "--fast-close-threshold-minutes",
+        type=int,
+        default=DEFAULT_FAST_CLOSE_THRESHOLD_MIN,
         help=(
-            "ISO date for the fast-close metric's lower bound (default "
-            f"{DEFAULT_FAST_CLOSE_START}); only the fast-close metric "
-            "uses this filter."
+            "Fast-close threshold in minutes (default "
+            f"{DEFAULT_FAST_CLOSE_THRESHOLD_MIN}). Issues closed within "
+            "this many minutes of being opened are counted in the "
+            "weekly fast-close time series."
         ),
     )
     args = p.parse_args(argv)
@@ -680,7 +827,7 @@ def main(argv: list[str] | None = None) -> int:
             log.info("speed: %s/%s", repo.owner, repo.name)
             run_for_repo(
                 conn, repo.owner, repo.name, output_dir,
-                fast_close_start=args.fast_close_start,
+                fast_close_threshold_minutes=args.fast_close_threshold_minutes,
             )
     finally:
         conn.close()

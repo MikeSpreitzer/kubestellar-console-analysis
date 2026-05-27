@@ -249,16 +249,18 @@ The analysis layer currently exposes six entry points:
   closing PR's ``merged_at`` is on or after a configurable cutoff
   (default ``2026-05-03``). Edges from ``linked_pr.pr_body_keyword``
   plus a 5-minute close-time heuristic.
-- ``src.analysis.speed`` -- speed and cadence metrics
-  (issue-to-first-linked-PR latency, PR-open-to-merge,
-  post-cutoff fast-close, MTTR with three methodologies side by
-  side). Uses the full producer taxonomy.
+- ``src.analysis.speed`` -- speed and cadence metrics as weekly
+  time series (issue-to-first-linked-PR latency,
+  PR-open-to-merge, fast-close count, MTTR with cumulative-open
+  and final-close methodologies × median/mean). Era boundaries
+  annotated on every plot. Uses the full producer taxonomy.
 - ``src.analysis.resolution_quality`` -- the two-regime
-  resolution-quality signals (high-precision/low-recall:
-  reopen-by-original-reporter, follow-up-citing-close-PR;
-  low-precision/higher-recall: post-close phrase matches in two
-  tiers, cross-reference patterns split before/after close). Every
-  output CSV is preceded by a caveat header naming the four shared
+  resolution-quality signals as weekly time series
+  (high-precision/low-recall: reopen-by-original-reporter,
+  follow-up-citing-close-PR; low-precision/higher-recall:
+  post-close phrase matches in ``explicit`` and ``general`` tiers,
+  cross-reference events). Era boundaries annotated. Every output
+  CSV is preceded by a caveat header naming the four shared
   limitations from this document. Uses the full producer taxonomy.
 
 For the specific plots and tables each entry point produces today, see
@@ -414,61 +416,79 @@ can see how much of either cross-tab comes from each.
    directly on the GitHub UI; also carries ``pr_merged_at`` so the
    same file can be re-windowed without re-running the module.
 
-**``speed``: speed and cadence metrics.** Per DESIGN.md these are
-speed metrics, not quality metrics; a high-throughput system can be
-shipping bad work quickly. All histogram plots use a shared
-log-minute x-axis from 0.5 minutes to 90 days.
+**``speed``: speed and cadence metrics, weekly time series.** Per
+DESIGN.md these are speed metrics, not quality metrics; a
+high-throughput system can be shipping bad work quickly. Per the
+era-awareness mandate the corpus is non-stationary on a timescale
+of weeks, so all four metrics here are weekly time series with
+era-boundary annotations rather than aggregates over the full
+window. Per-issue / per-PR values are placed in a weekly bin by
+the closing PR's ``merged_at``, with a fallback to the issue's
+``closed_at`` for issues closed without a linked merged PR (those
+issues are included rather than dropped).
 
-1. **Issue open -> first linked PR merge** -- full-history
-   distribution; producer breakdown by issue author. Edges from
-   ``linked_pr`` only.
-2. **PR open -> merge** -- full-history distribution; producer
-   breakdown by PR author.
-3. **Fast-close (post-cutoff)** -- histogram of close-latency for
-   issues created on or after a configurable cutoff (default
-   ``2026-05-03``, ``--fast-close-start`` overrides), plus a
-   threshold table at {1, 5, 15, 60} minutes giving counts and
-   closer-producer breakdown at each threshold.
-4. **MTTR** -- per-issue, three methodologies side by side:
-   first-close interval, final-close interval, and cumulative-open
-   time (sum of open->close intervals over the issue's life). The
-   gap between cumulative-open and final-close is reported.
-   Reopen counts are tracked per issue. Broken out by closer
-   producer.
+1. **Issue open -> first linked PR merge** -- weekly median by
+   issue-author producer of the per-issue interval. Edges from
+   ``linked_pr`` only. One line per producer; era boundaries
+   annotated.
+2. **PR open -> merge** -- weekly median by PR-author producer of
+   the per-PR interval. One line per producer.
+3. **Fast-close** -- weekly count of issues closed within
+   ``--fast-close-threshold-minutes`` minutes (default 5) of being
+   opened, stacked by closer producer. Replaces the previous
+   post-cutoff histogram.
+4. **MTTR** -- four separate charts: ``cumulative_open`` and
+   ``final_close`` methodologies, each with weekly median and
+   weekly mean (so four total). Each is per-week per-closer-producer
+   as a line chart on a log y-axis. The previous ``first_close``
+   methodology has been dropped. Cumulative-open is the sum of
+   ``(open -> close)`` intervals across the issue's life; final-close
+   is ``created_at -> last observed close``. Reopen counts are
+   recorded per issue in the per-issue CSV but not plotted directly.
 
 **``resolution_quality``: triangulation signals across two precision
-regimes.** Per the "Resolution-quality signals" section below, no
-single signal here is a measurement; convergence across signals is
-informative, divergence is ambiguous, low readings everywhere are
-*not* evidence the underlying phenomenon is absent. Every output CSV
-is preceded by a single-line caveat header naming the four shared
-limitations: silent drops, bidirectional adoption lag, attention
-non-uniformity, multi-case bundling.
+regimes, weekly time series.** Per the "Resolution-quality signals"
+section below, no single signal here is a measurement; convergence
+across signals is informative, divergence is ambiguous, low readings
+everywhere are *not* evidence the underlying phenomenon is absent.
+All four metrics are weekly counts stacked by the relevant producer,
+binned by the timestamp of the **signal trigger** itself (the event
+or comment that constitutes the signal). Era boundaries are
+annotated on every plot. Every output CSV is preceded by a
+single-line caveat header naming the four shared limitations: silent
+drops, bidirectional adoption lag, attention non-uniformity,
+multi-case bundling.
 
 High-precision / low-recall:
 
 1. **Reopen by original reporter** -- ``issue_event`` reopens where
-   ``actor_id == author_id``. Per-event CSV plus a summary by closer
-   producer (CSV plus bar PNG/HTML).
+   ``actor_id == author_id``. Per-event CSV plus a weekly count
+   stacked by closer producer (CSV + PNG + HTML).
 2. **Same-reporter follow-up citing closing PR** -- for each closed
    (issue, closing-PR) pair from ``linked_pr``, later same-reporter
    issues whose body or first comment contains either
-   ``owner/repo#N`` or bare ``#N`` matching the closing PR's
-   number. Per-edge CSV plus a summary by reporter producer.
+   ``owner/repo#N`` or bare ``#N`` matching the closing PR's number.
+   Per-edge CSV plus a weekly count stacked by reporter producer.
 
 Low-precision / higher-recall:
 
-3. **Post-close phrase matches** -- two tiers (``stronger``,
-   ``weaker``) of dissatisfaction phrases substring-matched
+3. **Post-close phrase matches** -- two tiers (``explicit``,
+   ``general``) of dissatisfaction phrases substring-matched
    (case-insensitive) against comments posted after the issue's
-   ``closed_at``. A comment hitting both tiers gets two rows. Per
-   tier: a per-match CSV, a summary by closer producer (CSV plus
-   bar PNG/HTML), and an ``is_reporter_followup`` flag promoting
-   matches by the original reporter toward the high-precision tier.
+   ``closed_at``. The tier names describe what each list contains
+   rather than a precision ordering -- see the comment on
+   ``PHRASE_TIERS`` in ``resolution_quality.py`` for why
+   "stronger / weaker" turned out to mislead, and why
+   ``regression`` was removed from the explicit list. A comment
+   hitting both tiers gets two rows. Per-match CSV plus, per tier,
+   a weekly count stacked by closer producer (CSV + PNG + HTML).
+   The per-match CSV carries an ``is_reporter_followup`` flag for
+   readers who want to subset to comments by the original reporter.
 4. **Cross-reference patterns** -- ``cross-referenced`` events on
-   closed issues, split into ``before_close`` / ``after_close`` /
-   ``never_closed`` and crossed with closer producer. Per-event CSV
-   plus a stacked-bar cross-tab PNG/HTML.
+   closed issues. The per-event CSV preserves
+   ``before_close`` / ``after_close`` / ``never_closed`` so a reader
+   can subset by direction. The weekly time-series plot is a single
+   stacked-bar series across all directions, by closer producer.
 
 ### Layer 4 — interpretation (out of scope for code)
 
@@ -707,24 +727,28 @@ is good. A high-throughput system can be shipping bad work quickly.
 - Time from PR open to merge, distribution
 - Issues closed within N minutes of opening (right-tail of fast closes)
 - **Mean Time To Resolution** of issues, broken out by closer
-  credential and by issue kind. Several methodologies should be
-  reported side by side because they diverge in the presence of
-  reopens:
+  producer. Methodologies diverge in the presence of reopens, so
+  multiple are reported. As implemented in ``speed.py``, two
+  methodologies are produced (the first-close-interval methodology
+  has been dropped; below is preserved as design context):
 
-  * *first-close interval*: open → first close. Smallest of the three.
-    Treats the issue as resolved at the first close even if it was
-    later reopened. Most "MTTR" tools use this by default.
+  * *first-close interval* (not produced): open → first close.
+    Smallest of the three. Treats the issue as resolved at the first
+    close even if it was later reopened. Most "MTTR" tools use this
+    by default; we judged it less informative than the two below
+    given how often hive's pipeline closes-then-reopens.
   * *cumulative-open time*: sum of all (open → close) intervals
     across the issue's life. Excludes the closed-and-then-reopened
     gaps where nobody was working on it. Best matches "how long was
     this an active concern."
-  * *final-close interval*: open → final close. Wall-clock from initial
-    report until things stabilized, including any
-    abandoned-then-resumed periods. Largest of the three.
+  * *final-close interval*: open → final close. Wall-clock from
+    initial report until things stabilized, including any
+    abandoned-then-resumed periods. Largest of the two.
 
-  Recommended primary metric: cumulative-open time. Also report
-  final-close interval and the count of reopened issues; the gap
-  between cumulative and final is itself informative.
+  Plotted as four weekly time-series charts: each methodology with
+  both median and mean (so cumulative-open-median, cumulative-open-
+  mean, final-close-median, final-close-mean). The reopen count is
+  recorded per-issue in the CSV but not plotted directly.
 
 ### Behavior and churn (descriptive, not evaluative)
 
