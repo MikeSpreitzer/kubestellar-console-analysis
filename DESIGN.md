@@ -232,8 +232,12 @@ plots to a small-multiples layout (one panel per producer) that
 renders well in both PNG and HTML.
 
 The analysis layer currently exposes six entry points:
-- ``src.analysis.first_look`` -- bot- vs. human-credential
-  daily-binned plots over GitHub-side data (issues, PRs, comments).
+- ``src.analysis.first_look`` -- six daily-binned bot- vs.
+  human-credential plots over GitHub-side data (issues, PRs,
+  comments) plus two volume-calibration plots: a weekly
+  stacked-bar of merged PRs by issues-closed bucket, and a
+  growing column of per-week histograms of issues filed per human
+  author from L5 onward.
 - ``src.analysis.drilldown`` -- follow-ups that surface specific
   rows or per-actor breakdowns informed by what the first-look plots
   reveal. Outputs are mostly CSV tables; the time-series follow-ups
@@ -268,6 +272,15 @@ The analysis layer currently exposes six entry points:
 For the specific plots and tables each entry point produces today, see
 [Current analysis outputs](#current-analysis-outputs) below.
 
+In addition to the modules above, two volume-calibration SQL
+queries live in README.md as ad-hoc recipes (one keyed on the issue
+lifecycle, one on merged-PR creation). They are deliberately not
+pipeline modules: they're one-shot characterizations whose output
+shape is meant to be read directly by a human, not consumed
+downstream, and changing them shouldn't require a rebuild. Keeping
+them as recipes lowers the bar for adjusting the calibration as
+questions evolve.
+
 ### Current analysis outputs
 
 The list below enumerates exactly what each entry point produces today.
@@ -296,8 +309,9 @@ table; verdicts are equivalent because the rule list is the same,
 but a query that wanted verdicts at classifier-version granularity
 would need to read the table.
 
-**``first_look``: six daily-binned stacked-area plots, per subject
-repo.** Each is rendered to PNG, HTML, and CSV.
+**``first_look``: six daily-binned stacked-area plots plus two
+weekly volume-calibration plots, per subject repo.** Each is
+rendered to PNG, HTML, and CSV.
 
 1. **Issues opened per day, by author credential** -- splits
    ``issue`` rows (``is_pr=0``) by the credential class of the opener.
@@ -313,6 +327,25 @@ repo.** Each is rendered to PNG, HTML, and CSV.
    on issue rows where ``is_pr=0``.
 6. **Comments on PRs per day, by commenter credential** -- comments on
    issue rows where ``is_pr=1``.
+7. **Merged-PR close-count distribution per week**
+   (``merged_pr_close_count_distribution``) -- weekly stacked-bar of
+   merged PRs created that week, stratified by how many issues each
+   PR closes (buckets 0, 1, 2, 3, 4, 5+). The ``0`` bucket measures
+   "work that landed without closing an issue" -- a calibration of
+   how much PR work happens entirely outside the issue lifecycle.
+   Era boundaries annotated.
+8. **Issues filed per human author per week, L5 onward**
+   (``human_issue_distribution``) -- a growing single-column stack
+   of per-week histograms. For each week from 2026-04-06 onward, one
+   panel: x-axis is log-spaced bins of issues-filed-per-author for
+   that week (1, 2, 3-5, 6-10, 11-20, 21-50, 51-100, 100+), y-axis
+   is count of distinct human-credentialed authors in that bin.
+   Distinguishes "few humans, many issues each" from "many humans,
+   few each" -- the per-author distribution that the
+   ``c_human``/``n_humans`` columns of the volume-calibration table
+   in README.md cannot show. Both PNG and HTML render the same
+   layout (vertical small-multiples, one row per week, independent
+   y-axes); the figure grows linearly with the number of weeks.
 
 **``drilldown``: follow-up artifacts informed by what first-look
 revealed.** Mostly CSV tables; one stacked-area HTML plot.
@@ -953,6 +986,26 @@ The asymmetry is the honest framing: a high reading in any signal
 is evidence the underlying phenomenon exists; a low reading in
 every signal is *not* evidence the phenomenon is absent (silent
 drops and adoption lag together can keep all signals quiet).
+
+**The reopen channel is structurally narrow.** The reopen-based
+high-precision signals require the reporter to notice the close
+didn't help, return to GitHub, find the closed issue, and explicitly
+reopen it -- the very burden the precision/recall framing implicitly
+assumed reporters would bear. Most reporters drop silently after a
+close, so the population that *can* trigger a reopen-based signal is
+a small fraction of the population whose dissatisfaction is at
+issue. This is not a limitation of the metric; it is a property of
+the channel. In ``kubestellar/console`` specifically, the
+volume-calibration query in [CALIBRATION.md](CALIBRATION.md) gives
+the population-wide upper bound: at the L5 peak only ~5.4% of
+issues created that week were ever reopened by anyone, and post-L5
+the rate sits below 1%. Those numbers are corpus-and-time-specific
+(see CALIBRATION.md's recency note), but the structural narrowness
+they expose generalizes: a "high count" reading on
+``_reopen_by_original_reporter`` is small in absolute terms by
+construction, and a "low count" reading is essentially uninformative
+about the underlying phenomenon. The asymmetric framing above
+applies with extra force.
 
 #### A separate signal not in the precision/recall framing
 

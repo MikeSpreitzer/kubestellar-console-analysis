@@ -324,6 +324,201 @@ for the fast-close count metric:
       -m src.analysis.speed --config /config/config.yaml --verbose
 ```
 
+### Volume calibration via direct SQL
+
+Two ad-hoc SQL queries against `data/db.sqlite` characterize weekly
+work volume — one for the issue lifecycle, one for the merged-PR
+lifecycle. They aren't part of any analysis module; the recipes
+live here so you can run and re-run them directly. Both inform how
+to read the speed and resolution-quality plots that follow: the
+issue table shows what fraction of issues ever get reopened (an
+upper bound on the population-wide reopen-channel signal), and the
+PR table shows how much work happens outside the issue lifecycle
+(merged PRs that close zero issues).
+
+A recorded snapshot of both query outputs lives in
+[CALIBRATION.md](CALIBRATION.md). The recipes below regenerate it.
+
+The issue-lifecycle query reports five weekly signals side by side.
+Column names are kept terse so the output fits an 80-column
+terminal; the legend below names what each column measures.
+
+| Column | Meaning |
+|---|---|
+| `week_start` | Monday of the week (W-SUN anchor, matches `to_week`). |
+| `reopens` | Reopen events that occurred that week. Population-wide upper bound on the high-precision reopen plot in `resolution_quality`. Event-keyed. |
+| `c_reopened` | Issues created that week that have ever been reopened. Cohort-keyed. |
+| `c_quiet` | Issues created that week that have never been reopened. Cohort-keyed. |
+| `c_human` | Issues created that week by a human-credentialed actor (v3 classifier label; upper bound on actual human work since humans may run automation under their own credentials). Cohort-keyed. |
+| `n_humans` | Distinct human authors among the `c_human` issues that week. Distinguishes "few humans, many issues each" from "many humans, few each." |
+
+The two kinds of weekly signal share one x-axis but mean different
+things: `reopens` is keyed on the week the reopen *happened*; every
+`c_*` and `n_*` column is keyed on the week the issue was *created*.
+They will not align row-by-row.
+
+    sqlite3 data/db.sqlite <<'EOF'
+    .headers on
+    .mode column
+    WITH reopen_events AS (
+      SELECT date(ie.created_at, 'weekday 0', '-6 days') AS week_start,
+             COUNT(*) AS reopens
+      FROM issue_event ie
+      JOIN issue i ON i.issue_id = ie.issue_id
+      WHERE i.repo_id = (
+              SELECT repo_id FROM repo
+              WHERE owner='kubestellar' AND name='console'
+            )
+        AND i.is_pr = 0
+        AND ie.event_type = 'reopened'
+      GROUP BY week_start
+    ),
+    issue_cohorts AS (
+      SELECT
+          date(i.created_at, 'weekday 0', '-6 days') AS week_start,
+          SUM(CASE WHEN EXISTS (
+                  SELECT 1 FROM issue_event ie
+                  WHERE ie.issue_id = i.issue_id
+                    AND ie.event_type = 'reopened'
+              ) THEN 1 ELSE 0 END) AS c_reopened,
+          SUM(CASE WHEN NOT EXISTS (
+                  SELECT 1 FROM issue_event ie
+                  WHERE ie.issue_id = i.issue_id
+                    AND ie.event_type = 'reopened'
+              ) THEN 1 ELSE 0 END) AS c_quiet,
+          SUM(CASE WHEN EXISTS (
+                  SELECT 1 FROM producer_classification pc
+                  WHERE pc.target_kind = 'issue'
+                    AND pc.target_id = i.issue_id
+                    AND pc.classifier_version = 'v3'
+                    AND pc.producer = 'human-credentialed'
+              ) THEN 1 ELSE 0 END) AS c_human,
+          COUNT(DISTINCT CASE WHEN EXISTS (
+                  SELECT 1 FROM producer_classification pc
+                  WHERE pc.target_kind = 'issue'
+                    AND pc.target_id = i.issue_id
+                    AND pc.classifier_version = 'v3'
+                    AND pc.producer = 'human-credentialed'
+              ) THEN i.author_id END) AS n_humans
+      FROM issue i
+      WHERE i.repo_id = (
+              SELECT repo_id FROM repo
+              WHERE owner='kubestellar' AND name='console'
+            )
+        AND i.is_pr = 0
+      GROUP BY week_start
+    )
+    SELECT
+        COALESCE(re.week_start, ic.week_start) AS week_start,
+        COALESCE(re.reopens, 0)                AS reopens,
+        COALESCE(ic.c_reopened, 0)             AS c_reopened,
+        COALESCE(ic.c_quiet, 0)                AS c_quiet,
+        COALESCE(ic.c_human, 0)                AS c_human,
+        COALESCE(ic.n_humans, 0)               AS n_humans
+    FROM reopen_events re
+    FULL OUTER JOIN issue_cohorts ic ON re.week_start = ic.week_start
+    ORDER BY week_start;
+    EOF
+
+The `weekday 0` / `-6 days` modifiers floor to Monday, matching the
+W-SUN week anchor used by `to_week` in the analysis pipeline, so
+this output overlays cleanly on the weekly speed and
+resolution-quality charts.
+
+A few caveats to keep in mind when reading the table:
+
+- The query uses `FULL OUTER JOIN`, supported by SQLite ≥ 3.39
+  (Feb 2022). Whichever environment you run the query in needs at
+  least that version; macOS Sonoma+ and recent Linux distributions
+  do, but older `sqlite3` binaries do not. On an older install the
+  join would need to be expressed as two `LEFT JOIN`s unioned
+  together.
+- `c_reopened` is *retroactive*: it depends on whether a future
+  event flips the issue's state. The most recent weeks will
+  undercount because there hasn't been enough time for reopens
+  that haven't happened yet. The column is most reliable for older
+  weeks where the reopen window has had time to play out.
+- `c_reopened + c_quiet` equals the total issues created that week
+  (the denominator ``first_look``'s issues-opened plot already
+  shows). If you want a per-week reopen rate, that's
+  `c_reopened / (c_reopened + c_quiet)` computed inline.
+- `c_human` and `n_humans` depend on the classifier having been
+  run at the v3 version. If `producer_classification` is empty for
+  that version, both columns will be zero — bump the classifier
+  first.
+
+The merged-PR-lifecycle query characterizes how much work happens
+outside the issue lifecycle by looking at merged PRs and how many
+issues each one closes. The columns are per-week distributions of
+issues-closed-by-PR. The legend below names what each column
+measures.
+
+| Column | Meaning |
+|---|---|
+| `week_start` | Monday of the PR's `created_at` week (W-SUN anchor). |
+| `merged` | Merged PRs created that week. |
+| `n0`..`n4` | Merged PRs created that week that closed exactly 0, 1, 2, 3, 4 issues respectively. |
+| `n5+` | Merged PRs that closed 5 or more issues. |
+| `mean_isc` | Mean issues closed per merged PR, denominator restricted to PRs that closed at least one (i.e., `n0` excluded). |
+
+`n0` is the "PR that landed work without closing an issue" bucket —
+the natural counterpart to "issues created that week" in the issue
+table. A high `n0` count says a lot of work this week happened
+outside the issue lifecycle.
+
+    sqlite3 data/db.sqlite <<'EOF'
+    .headers on
+    .mode column
+    WITH pr_close_counts AS (
+      SELECT
+          pr.issue_id AS pr_id,
+          date(pr_iss.created_at, 'weekday 0', '-6 days') AS week_start,
+          (SELECT COUNT(*) FROM linked_pr lp
+            WHERE lp.pr_id = pr.issue_id) AS n_closed
+      FROM pull_request pr
+      JOIN issue pr_iss ON pr_iss.issue_id = pr.issue_id
+      WHERE pr_iss.repo_id = (
+              SELECT repo_id FROM repo
+              WHERE owner='kubestellar' AND name='console'
+            )
+        AND pr_iss.is_pr = 1
+        AND pr.merged = 1
+    )
+    SELECT
+        week_start,
+        COUNT(*)                                          AS merged,
+        SUM(CASE WHEN n_closed = 0 THEN 1 ELSE 0 END)     AS n0,
+        SUM(CASE WHEN n_closed = 1 THEN 1 ELSE 0 END)     AS n1,
+        SUM(CASE WHEN n_closed = 2 THEN 1 ELSE 0 END)     AS n2,
+        SUM(CASE WHEN n_closed = 3 THEN 1 ELSE 0 END)     AS n3,
+        SUM(CASE WHEN n_closed = 4 THEN 1 ELSE 0 END)     AS n4,
+        SUM(CASE WHEN n_closed >= 5 THEN 1 ELSE 0 END)    AS [n5+],
+        ROUND(
+            CAST(SUM(CASE WHEN n_closed >= 1 THEN n_closed ELSE 0 END)
+                 AS REAL)
+            / NULLIF(SUM(CASE WHEN n_closed >= 1 THEN 1 ELSE 0 END), 0),
+            2
+        )                                                 AS mean_isc
+    FROM pr_close_counts
+    GROUP BY week_start
+    ORDER BY week_start;
+    EOF
+
+Caveats:
+
+- `merged = n0 + n1 + n2 + n3 + n4 + n5+` by construction.
+- `mean_isc` is `NULL` for weeks where every merged PR closed zero
+  issues (denominator zero); read those rows as "no closing PRs to
+  average over," not as "0 issues closed on average."
+- "Closes an issue" here is the count of `linked_pr` rows referencing
+  this PR — populated from `closes/fixes/resolves` keywords in PR
+  bodies plus GitHub's own linked-issue events. A PR that closed an
+  issue without either signal is not counted; that's a known
+  data-completeness limit of the extraction layer rather than this
+  query.
+- The `[n5+]` column-name uses square-bracket quoting because `+`
+  isn't a legal bare identifier in SQL.
+
 `resolution_quality` produces weekly time-series resolution-quality
 signals: high-precision/low-recall (reopen by original reporter;
 same-reporter follow-up citing the closing PR) and
@@ -346,6 +541,14 @@ evidence the underlying phenomenon is absent:
       -v "$(pwd)/output:/output" \
       console-analysis \
       -m src.analysis.resolution_quality --config /config/config.yaml --verbose
+
+The `_reopen_by_original_reporter` plot only counts reopens whose
+actor is the original issue author — a deliberately narrow
+high-precision signal. The volume-calibration table above (issue
+lifecycle) shows the population-wide upper bound: a reopen-event
+total per week (`reopens`) and a per-cohort count of issues created
+that week that ever got reopened (`c_reopened`). Both bound how
+much signal a per-producer reopen plot can carry.
 
 Each plot is produced in three forms:
 - `output/plots/<repo>/*.png` -- static, portable, paste-into-doc
